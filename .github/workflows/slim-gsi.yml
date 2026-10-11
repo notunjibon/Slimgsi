@@ -31,7 +31,7 @@ on:
   workflow_dispatch:
     inputs:
       url:
-        description: "https://twds.dl.sourceforge.net/project/treblerom/crDRom11/2022.03.30/crdrom-v316-220330-arm64-bgZ.img.xz?viasf=1&fid=7a3fa5ce81fb2adf&e=1791814093&st=G7yWJkstvJeeSLh_jssagg"
+        description: "Direct URL of the GSI .img.xz (SourceForge .../download links work)"
         required: true
         type: string
       delete_list:
@@ -129,7 +129,9 @@ jobs:
                   t, extra = "f", "%d:%d:%s" % (st.st_size, st.st_nlink, sha(p))
               else:
                   t, extra = "o", "%d" % st.st_rdev
-              return "\t".join([rel, t, "%04o" % (m & 0o7777), str(st.st_uid), str(st.st_gid), extra, xattrs(p)])
+              # symlink permission bits are ignored by Linux (always 0777), mke2fs normalises them
+              mode = "-" if t == "l" else "%04o" % (m & 0o7777)
+              return "\t".join([rel, t, mode, str(st.st_uid), str(st.st_gid), extra, xattrs(p)])
 
           with open(out, "w", encoding="utf-8", errors="surrogateescape") as f:
               f.write(line(root, "/") + "\n")
