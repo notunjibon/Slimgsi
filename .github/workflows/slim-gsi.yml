@@ -427,7 +427,8 @@ jobs:
           TAG="slim-$(date -u +%Y%m%d-%H%M%S)-${GITHUB_RUN_ID}"
           FILES=$(ls "$NAME"-slim.img.xz* "$NAME"-slim.img.sha256 | tr '\n' ' ')
           SHA=$(cut -d' ' -f1 "$NAME-slim.img.sha256")
-          cat > notes.md <<EOF
+          NOTES="$RUNNER_TEMP/notes.md"
+          cat > "$NOTES" <<EOF
           Slimmed GSI: ${NAME}
 
           Contains a sparse system image (xz-compressed). Decompress with 7-Zip or: xz -d
@@ -441,7 +442,7 @@ jobs:
             fastboot -w
           EOF
           gh release create "$TAG" $FILES --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-             --title "${NAME} (slim)" --notes-file notes.md
+             --title "${NAME} (slim)" --notes-file "$NOTES"
           {
             echo "### Download"
             for f in $FILES; do
