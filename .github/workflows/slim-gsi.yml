@@ -1,0 +1,451 @@
+# Slim GSI
+#
+# Put this file at:  .github/workflows/slim-gsi.yml
+# Run it from:       Actions tab -> "Slim GSI" -> Run workflow
+#
+# What it does
+#   1. Downloads a GSI (.img.xz) from the URL you give (SourceForge is fine)
+#   2. Decompresses it, un-sparses it if needed
+#   3. Mounts it read-only, copies EVERYTHING to a staging dir with rsync
+#      (-aHAX --numeric-ids: owners, modes, hard links, symlinks, ACLs, xattrs
+#      = SELinux labels + file capabilities)
+#   4. Deletes the paths you listed from the staging copy
+#   5. Rebuilds an ext4 image with mke2fs -d, using the SAME ext4 feature set,
+#      block size, inode size, label and UUID as the original (so the phone's
+#      kernel can mount it), sized to fit under your partition limit
+#   6. Converts to a sparse image (img2simg)
+#   7. VERIFIES the result: fsck, size limit, and a per-file comparison of
+#      type/mode/uid/gid/xattrs/symlink target/SHA-256 against the original
+#      (everything except the deleted paths must be identical)
+#   8. Compresses with xz and publishes a GitHub Release -> direct download link
+#
+# Tip: run once with dry_run = true first. It only lists what matches your
+# delete patterns, how big each is, and the biggest folders, then stops.
+#
+# NOTE: Release assets of a PUBLIC repo are public. A gapps GSI contains Google's
+# proprietary apps, so use a PRIVATE repo (you can still download while logged in).
+
+name: Slim GSI
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "https://twds.dl.sourceforge.net/project/treblerom/crDRom11/2022.03.30/crdrom-v316-220330-arm64-bgZ.img.xz?viasf=1&fid=7a3fa5ce81fb2adf&e=1791814093&st=G7yWJkstvJeeSLh_jssagg"
+        required: true
+        type: string
+      delete_list:
+        description: "Comma-separated paths to delete, relative to the system tree. Globs allowed, case-insensitive."
+        required: true
+        type: string
+        default: "product/app/*contacts*,product/app/*jelly*,product/app/*talkback*,product/app/*webview*,product/app/*recorder*,product/app/*calculator*,product/priv-app/*eleven*,product/priv-app/*velvet*,product/priv-app/*wellbeing*,product/usr/srec/en-US"
+      max_mib:
+        description: "Largest allowed filesystem size in MiB (2.56 GiB = 2621; default leaves a little slack)"
+        required: true
+        type: string
+        default: "2600"
+      dry_run:
+        description: "true = only list matches and sizes, then stop"
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  slim:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    defaults:
+      run:
+        # every step runs as root (needed for mount, xattrs, ownership)
+        shell: "sudo -E bash --noprofile --norc -eo pipefail {0}"
+    env:
+      URL: ${{ inputs.url }}
+      DELETE_LIST: ${{ inputs.delete_list }}
+      MAX_MIB: ${{ inputs.max_mib }}
+      DRY_RUN: ${{ inputs.dry_run }}
+
+    steps:
+      - name: Prepare tools, disk and helper scripts
+        run: |
+          rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq
+          apt-get install -y -qq e2fsprogs rsync xz-utils android-sdk-libsparse-utils python3
+          for t in mke2fs e2fsck dumpe2fs rsync xz img2simg simg2img python3; do
+            command -v "$t" >/dev/null || { echo "::error::missing tool $t"; exit 1; }
+          done
+          mke2fs -V 2>&1 | head -1 || true
+
+          # pick the disk with more free space
+          A=$(df --output=avail -B1 /mnt | tail -1 | tr -d ' ')
+          B=$(df --output=avail -B1 "$RUNNER_TEMP" | tail -1 | tr -d ' ')
+          if [ "$A" -ge "$B" ]; then W=/mnt/gsi; else W="$RUNNER_TEMP/gsi"; fi
+          mkdir -p "$W"
+          echo "WORK=$W" >> "$GITHUB_ENV"
+          echo "Work dir: $W  (free: $(df -h --output=avail "$W" | tail -1))"
+          AV=$(df --output=avail -B1 "$W" | tail -1 | tr -d ' ')
+          [ "$AV" -ge $((10*1024*1024*1024)) ] || echo "::warning::less than 10 GiB free, the job may run out of disk"
+
+          # ---- helper: manifest of a mounted tree ----
+          cat > "$W/manifest.py" <<'PY'
+          import hashlib, os, stat, sys
+          root, out = sys.argv[1], sys.argv[2]
+
+          def xattrs(p):
+              try:
+                  names = sorted(os.listxattr(p, follow_symlinks=False))
+              except OSError as e:
+                  return "ERR%s" % e.errno
+              parts = []
+              for n in names:
+                  try:
+                      v = os.getxattr(p, n, follow_symlinks=False)
+                      parts.append("%s=%s" % (n, v.hex()))
+                  except OSError as e:
+                      parts.append("%s=ERR%s" % (n, e.errno))
+              return ";".join(parts)
+
+          def sha(p):
+              h = hashlib.sha256()
+              with open(p, "rb") as f:
+                  while True:
+                      b = f.read(1 << 20)
+                      if not b:
+                          break
+                      h.update(b)
+              return h.hexdigest()
+
+          def line(p, rel):
+              st = os.lstat(p)
+              m = st.st_mode
+              if stat.S_ISDIR(m):
+                  t, extra = "d", ""
+              elif stat.S_ISLNK(m):
+                  t, extra = "l", os.readlink(p)
+              elif stat.S_ISREG(m):
+                  t, extra = "f", "%d:%d:%s" % (st.st_size, st.st_nlink, sha(p))
+              else:
+                  t, extra = "o", "%d" % st.st_rdev
+              return "\t".join([rel, t, "%04o" % (m & 0o7777), str(st.st_uid), str(st.st_gid), extra, xattrs(p)])
+
+          with open(out, "w", encoding="utf-8", errors="surrogateescape") as f:
+              f.write(line(root, "/") + "\n")
+              for dp, dns, fns in os.walk(root):
+                  dns[:] = sorted(d for d in dns if not (dp == root and d == "lost+found"))
+                  for name in sorted(dns + fns):
+                      p = os.path.join(dp, name)
+                      rel = "/" + os.path.relpath(p, root)
+                      f.write(line(p, rel) + "\n")
+          PY
+
+          # ---- helper: compare original vs rebuilt manifest ----
+          cat > "$W/compare.py" <<'PY'
+          import sys
+          old_fn, new_fn, del_fn = sys.argv[1:4]
+          dels = [l.rstrip("\n") for l in open(del_fn, encoding="utf-8", errors="surrogateescape") if l.strip()]
+
+          def gone(path):
+              return any(path == d or path.startswith(d + "/") for d in dels)
+
+          def load(fn, filt):
+              d = {}
+              for l in open(fn, encoding="utf-8", errors="surrogateescape"):
+                  l = l.rstrip("\n")
+                  path = l.split("\t", 1)[0]
+                  if filt and gone(path):
+                      continue
+                  d[path] = l
+              return d
+
+          a = load(old_fn, True)
+          b = load(new_fn, False)
+          missing = sorted(set(a) - set(b))
+          extra = sorted(set(b) - set(a))
+          diff = sorted(p for p in set(a) & set(b) if a[p] != b[p])
+          print("entries compared: %d, deleted prefixes: %d" % (len(a), len(dels)))
+          print("missing in new: %d   extra in new: %d   different: %d" % (len(missing), len(extra), len(diff)))
+          for p in missing[:30]:
+              print("MISSING  ", p)
+          for p in extra[:30]:
+              print("EXTRA    ", p)
+          for p in diff[:30]:
+              print("DIFF old ", a[p])
+              print("     new ", b[p])
+          sys.exit(1 if (missing or extra or diff) else 0)
+          PY
+
+      - name: Download
+        run: |
+          cd "$WORK"
+          curl -fL --retry 5 --retry-all-errors --retry-delay 10 -A "Wget/1.21.4" -o in.img.xz "$URL"
+          ls -l in.img.xz
+          magic=$(head -c6 in.img.xz | od -An -tx1 | tr -d ' \n')
+          if [ "$magic" != "fd377a585a00" ]; then
+            echo "::error::Downloaded file is not an .xz archive (got a web page?). Use the direct download link."
+            head -c 300 in.img.xz || true
+            exit 1
+          fi
+          b="${URL%%[?#]*}"; b="${b%/}"; b="${b%/download}"
+          n="$(basename "$b")"; n="${n%.xz}"; n="${n%.img}"
+          n="$(printf '%s' "$n" | tr -c 'A-Za-z0-9._-' '_')"
+          [ -n "$n" ] || n=gsi
+          echo "NAME=$n" >> "$GITHUB_ENV"
+          echo "Output name: $n-slim.img"
+
+      - name: Decompress and un-sparse
+        run: |
+          cd "$WORK"
+          xz -dc in.img.xz > raw0.img
+          rm -f in.img.xz
+          if [ "$(head -c4 raw0.img | od -An -tx1 | tr -d ' \n')" = "3aff26ed" ]; then
+            echo "Source is an Android sparse image, converting to raw"
+            simg2img raw0.img orig.img
+            rm -f raw0.img
+          else
+            mv raw0.img orig.img
+          fi
+          ls -l orig.img
+          if ! dumpe2fs -h orig.img > orig.dumpe2fs 2>/dev/null; then
+            echo "::error::This is not an ext4 image (erofs is not supported by this workflow)."
+            exit 1
+          fi
+          grep -E '^(Filesystem (volume name|UUID|features|state)|Block (count|size)|Free blocks|Inode (count|size))' orig.dumpe2fs
+
+      - name: Mount original and resolve what will be deleted
+        run: |
+          cd "$WORK"
+          MNT="$WORK/src"; mkdir -p "$MNT"
+          mount -t ext4 -o ro,noload,loop orig.img "$MNT"
+          if [ -d "$MNT/system/app" ] && [ ! -L "$MNT/system" ]; then SYS="$MNT/system"; else SYS="$MNT"; fi
+          echo "MNT=$MNT" >> "$GITHUB_ENV"
+          echo "SYS=$SYS" >> "$GITHUB_ENV"
+          echo "Image root contains:"; (ls "$MNT" | head -40) || true
+          echo "System tree = ${SYS#$MNT}/ (empty = image root)"
+
+          shopt -s nocaseglob nullglob
+          : > delete.txt
+          total=0
+          IFS=',' read -r -a ENTRIES <<< "$DELETE_LIST"
+          echo
+          echo "=== Matches ==="
+          for e in "${ENTRIES[@]}"; do
+            e="$(printf '%s' "$e" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s#^/*##')"
+            [ -n "$e" ] || continue
+            case "$e" in *..*) echo "::error::'..' is not allowed: $e"; exit 1;; esac
+            case "$e" in */*) ;; *) echo "::error::Entry needs at least 2 path parts (e.g. product/app/Foo): $e"; exit 1;; esac
+            found=0
+            for base in "$SYS" "$MNT"; do
+              for p in $base/$e; do
+                real="$(readlink -f "$(dirname "$p")")/$(basename "$p")"
+                case "$real" in
+                  "$MNT"/*) ;;
+                  *) echo "::warning::skipped $p (path leaves the image through a symlink)"; continue;;
+                esac
+                [ -e "$p" ] || [ -L "$p" ] || continue
+                if grep -qxF "$p" delete.txt; then found=$((found+1)); continue; fi
+                sz=$(du -sb "$p" | cut -f1)
+                total=$((total+sz)); found=$((found+1))
+                printf '%s\n' "$p" >> delete.txt
+                printf '  %8.2f MiB  %s\n' "$(awk -v s="$sz" 'BEGIN{print s/1048576}')" "${p#$MNT}"
+              done
+              if [ "$found" -gt 0 ]; then break; fi
+            done
+            if [ "$found" -eq 0 ]; then echo "::warning::no match for '$e'"; fi
+          done
+          [ -s delete.txt ] || { echo "::error::Nothing matched your delete list."; exit 1; }
+          echo "TOTAL to delete: $(awk -v s="$total" 'BEGIN{printf "%.2f", s/1048576}') MiB"
+
+          bs=$(awk '/^Block size:/{print $3}' orig.dumpe2fs)
+          bc=$(awk '/^Block count:/{print $3}' orig.dumpe2fs)
+          fb=$(awk '/^Free blocks:/{print $3}' orig.dumpe2fs)
+          used=$(( (bc-fb)*bs ))
+          after=$(( used-total ))
+          echo "Used in original fs : $((used/1048576)) MiB"
+          echo "Estimated after     : $((after/1048576)) MiB   (limit: $MAX_MIB MiB, + ~1-2% ext4 metadata)"
+          if [ $((after/1048576)) -gt $((MAX_MIB-30)) ]; then
+            echo "::warning::Very tight or too big. Look at the biggest folders below and add more paths to delete_list."
+          fi
+
+          echo
+          echo "=== Biggest folders (candidates for extra deletion) ==="
+          ( du -sk "$SYS"/app/* "$SYS"/priv-app/* "$SYS"/product/app/* "$SYS"/product/priv-app/* \
+                   "$SYS"/system_ext/app/* "$SYS"/system_ext/priv-app/* 2>/dev/null \
+            | sort -rn | head -40 \
+            | awk '{printf "  %8.1f MiB  %s\n", $1/1024, $2}' | sed "s#$MNT##" ) || true
+
+          {
+            echo "### Delete plan"
+            echo "Total to delete: **$(awk -v s="$total" 'BEGIN{printf "%.2f", s/1048576}') MiB**  "
+            echo "Estimated size after: **$((after/1048576)) MiB** (limit $MAX_MIB MiB)"
+            echo '```'; sed "s#$MNT##" delete.txt; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "Dry run requested, stopping here."
+            umount "$MNT"
+          fi
+
+      - name: Copy with full metadata, then delete
+        if: ${{ !inputs.dry_run }}
+        run: |
+          cd "$WORK"
+          echo "Manifest of original (hashes every file, takes a few minutes)"
+          python3 manifest.py "$MNT" orig.manifest
+          wc -l orig.manifest
+
+          STG="$WORK/stg"; mkdir -p "$STG"
+          rsync -aHAX --numeric-ids --info=stats2 --exclude='/lost+found' "$MNT"/ "$STG"/
+
+          : > deleted.rel
+          while IFS= read -r p; do
+            rel="${p#$MNT}"
+            [ -n "$rel" ] || continue
+            t="$STG$rel"
+            real="$(readlink -f "$(dirname "$t")")/$(basename "$t")"
+            case "$real" in "$STG"/*) ;; *) echo "::error::refusing to delete outside staging: $t"; exit 1;; esac
+            rm -rf --one-file-system "$t"
+            echo "$rel" >> deleted.rel
+          done < delete.txt
+          echo "Deleted $(wc -l < deleted.rel) paths"
+
+          umount "$MNT"
+          rm -f orig.img
+          df -h "$WORK" | tail -1
+
+      - name: Rebuild ext4 (same features) and convert to sparse
+        if: ${{ !inputs.dry_run }}
+        run: |
+          cd "$WORK"
+          STG="$WORK/stg"
+          H=orig.dumpe2fs
+          BS=$(awk '/^Block size:/{print $3}' $H)
+          ISZ=$(awk '/^Inode size:/{print $3}' $H)
+          LABEL=$(sed -n 's/^Filesystem volume name:[[:space:]]*//p' $H)
+          if [ "$LABEL" = "<none>" ]; then LABEL=""; fi
+          UUID=$(sed -n 's/^Filesystem UUID:[[:space:]]*//p' $H)
+          FEATS=$(sed -n 's/^Filesystem features:[[:space:]]*//p' $H)
+
+          # same features as the original, minus journal/sharing/runtime flags
+          KEEP=""
+          for f in $FEATS; do
+            case "$f" in has_journal|needs_recovery|journal_dev|shared_blocks|fast_commit|orphan_present|orphan_file) continue;; esac
+            case "$f" in *[!a-z0-9_]*) continue;; esac
+            KEEP="${KEEP:+$KEEP,}$f"
+          done
+          echo "block size=$BS inode size=$ISZ label='$LABEL' uuid=$UUID"
+          echo "features kept: $KEEP"
+
+          USED=$(du -sB1 "$STG" | cut -f1)
+          NFILES=$(find "$STG" -xdev | wc -l)
+          INODES=$(( NFILES + 3000 ))
+          EST=$(( USED + USED/50 + 40*1048576 ))
+          MAXB=$(( MAX_MIB*1048576 ))
+          if [ "$USED" -gt $(( MAXB - 8*1048576 )) ]; then
+            need=$(( (USED - MAXB + 8*1048576)/1048576 + 1 ))
+            echo "::error::Content is $((USED/1048576)) MiB, limit is $MAX_MIB MiB. Delete at least $need MiB more (extend delete_list)."
+            exit 1
+          fi
+          SIZE=$(( EST < MAXB ? EST : MAXB ))
+          SIZE=$(( (SIZE + BS - 1) / BS * BS ))
+          echo "content=$((USED/1048576)) MiB  files=$NFILES  inodes=$INODES  fs size=$((SIZE/1048576)) MiB"
+
+          truncate -s "$SIZE" new.raw
+          EXTRA=()
+          if [ -n "$LABEL" ]; then EXTRA+=(-L "$LABEL"); fi
+          if [ -n "$UUID" ]; then EXTRA+=(-U "$UUID"); fi
+          if ! mke2fs -F -q -t ext4 -O "none,${KEEP}" -b "$BS" -I "$ISZ" -N "$INODES" -m 0 \
+                 "${EXTRA[@]}" -E root_owner=0:0 -d "$STG" new.raw; then
+            echo "::error::mke2fs failed (probably not enough room). Raise max_mib or delete more."
+            exit 1
+          fi
+
+          e2fsck -fn new.raw
+          dumpe2fs -h new.raw > new.dumpe2fs 2>/dev/null
+          NEWF=$(sed -n 's/^Filesystem features:[[:space:]]*//p' new.dumpe2fs)
+          echo "original features: $FEATS"
+          echo "new features     : $NEWF"
+          for f in metadata_csum 64bit orphan_file encrypt casefold verity ea_inode large_dir; do
+            case " $NEWF " in
+              *" $f "*) case " $FEATS " in *" $f "*) ;; *) echo "::error::new image has feature '$f' that the original did not (old kernels may refuse to mount it)"; exit 1;; esac;;
+            esac
+          done
+
+          RAW=$(stat -c %s new.raw)
+          [ "$RAW" -le "$MAXB" ] || { echo "::error::raw image $RAW > limit $MAXB"; exit 1; }
+
+          img2simg new.raw "$NAME-slim.img" "$BS"
+          rm -rf new.raw "$STG"
+          ls -l "$NAME-slim.img"
+
+      - name: Verify the sparse image (fsck + file-by-file comparison)
+        if: ${{ !inputs.dry_run }}
+        run: |
+          cd "$WORK"
+          simg2img "$NAME-slim.img" chk.raw
+          SZ=$(stat -c %s chk.raw)
+          MAXB=$(( MAX_MIB*1048576 ))
+          echo "expanded size: $((SZ/1048576)) MiB (limit $MAX_MIB MiB)"
+          [ "$SZ" -le "$MAXB" ] || { echo "::error::expanded image exceeds limit"; exit 1; }
+          e2fsck -fn chk.raw
+          CHK="$WORK/chk"; mkdir -p "$CHK"
+          mount -t ext4 -o ro,noload,loop chk.raw "$CHK"
+          python3 manifest.py "$CHK" new.manifest
+          umount "$CHK"
+          rm -f chk.raw
+          python3 compare.py orig.manifest new.manifest deleted.rel
+          echo "VERIFIED: all remaining files identical in type, mode, owner, SELinux label/xattrs, link target and content."
+
+      - name: Compress
+        if: ${{ !inputs.dry_run }}
+        run: |
+          cd "$WORK"
+          OUT="$NAME-slim.img"
+          sha256sum "$OUT" > "$OUT.sha256"
+          xz -T0 -6 "$OUT"
+          SZ=$(stat -c %s "$OUT.xz")
+          echo "compressed: $((SZ/1048576)) MiB"
+          if [ "$SZ" -gt 2040000000 ]; then
+            echo "Above the 2 GiB release-asset limit, splitting"
+            split -b 1900M -d -a 2 "$OUT.xz" "$OUT.xz.part"
+            rm -f "$OUT.xz"
+          fi
+          ls -l "$WORK" | grep -E 'slim' || true
+
+      - name: Publish release (download link)
+        if: ${{ !inputs.dry_run }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd "$WORK"
+          TAG="slim-$(date -u +%Y%m%d-%H%M%S)-${GITHUB_RUN_ID}"
+          FILES=$(ls "$NAME"-slim.img.xz* "$NAME"-slim.img.sha256 | tr '\n' ' ')
+          SHA=$(cut -d' ' -f1 "$NAME-slim.img.sha256")
+          cat > notes.md <<EOF
+          Slimmed GSI: ${NAME}
+
+          Contains a sparse system image (xz-compressed). Decompress with 7-Zip or: xz -d
+          If the file is split (.part00, .part01 ...) join them first: cat file.xz.part* > file.xz
+
+          sha256 of the decompressed .img: ${SHA}
+
+          Flash (A/B, no fastbootd):
+            fastboot flash system ${NAME}-slim.img
+            (if your device uses AVB) fastboot --disable-verity --disable-verification flash vbmeta vbmeta.img
+            fastboot -w
+          EOF
+          gh release create "$TAG" $FILES --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+             --title "${NAME} (slim)" --notes-file notes.md
+          {
+            echo "### Download"
+            for f in $FILES; do
+              echo "- https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${f}"
+            done
+            echo
+            echo "Release page: https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          
