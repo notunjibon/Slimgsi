@@ -38,7 +38,7 @@ on:
         description: "Comma-separated paths to delete, relative to the system tree. Globs allowed, case-insensitive."
         required: true
         type: string
-        default: "product/app/*contacts*,product/app/*jelly*,product/app/*talkback*,product/app/*webview*,product/app/*recorder*,product/app/*calculator*,product/priv-app/*eleven*,product/priv-app/*velvet*,product/priv-app/*wellbeing*,product/usr/srec/en-US"
+        default: "product/app/webview,product/app/talkback,product/app/ExactCalculator,product/app/Jelly,product/app/GoogleContacts,product/app/Recorder,product/app/Messages,product/priv-app/Eleven,product/priv-app/Wellbeing,product/priv-app/Velvet,product/usr/srec/en-US"
       max_mib:
         description: "Largest allowed filesystem size in MiB (2.56 GiB = 2621; default leaves a little slack)"
         required: true
@@ -448,4 +448,3 @@ jobs:
             echo
             echo "Release page: https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
           } | tee -a "$GITHUB_STEP_SUMMARY"
-          
