@@ -19,168 +19,66 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y xz-utils unzip android-sdk-libsparse-utils binutils
+          sudo apt-get install -y xz-utils android-sdk-libsparse-utils binutils
 
-      - name: Download GSI images
+      - name: Download and decompress GSI images
         run: |
           cd /tmp
-          echo "Downloading A11 from: ${{ github.event.inputs.a11_url }}"
+          
+          echo "=== Downloading A11 ==="
           wget -q -O a11.xz "${{ github.event.inputs.a11_url }}"
-          
-          echo "Downloading A16 from: ${{ github.event.inputs.a16_url }}"
-          wget -q -O a16.xz "${{ github.event.inputs.a16_url }}"
-          
-          echo "=== Downloaded files ==="
-          ls -lh /tmp/a*.xz
-
-      - name: Decompress and extract GSI archives
-        run: |
-          cd /tmp
-          
-          # Decompress .xz files
           xz -d a11.xz
+          
+          echo "=== Downloading A16 ==="
+          wget -q -O a16.xz "${{ github.event.inputs.a16_url }}"
           xz -d a16.xz
           
-          echo "=== After xz decompression ==="
-          ls -lh /tmp/a11 /tmp/a16 2>/dev/null || ls -lh /tmp/a*
-          
-          # Extract archives
-          mkdir -p a11_extracted a16_extracted
-          unzip -q a11 -d a11_extracted
-          unzip -q a16 -d a16_extracted
-          
-          echo "=== Contents of a11_extracted ==="
-          ls -lh /tmp/a11_extracted/
-          
-          echo "=== Contents of a16_extracted ==="
-          ls -lh /tmp/a16_extracted/
-          
-          # Find .img files (any name)
-          SYSTEM_A11=$(find /tmp/a11_extracted -maxdepth 2 -name "*.img" | head -1)
-          SYSTEM_A16=$(find /tmp/a16_extracted -maxdepth 2 -name "*.img" | head -1)
-          
-          echo ""
-          echo "=== Located .img files ==="
-          echo "A11: $SYSTEM_A11"
-          echo "A16: $SYSTEM_A16"
-          
-          if [ -z "$SYSTEM_A11" ] || [ -z "$SYSTEM_A16" ]; then
-            echo "ERROR: .img files not found!"
-            echo "Full directory listing:"
-            find /tmp/a*_extracted -type f
-            exit 1
-          fi
-          
-          # Save paths to environment for next steps
-          echo "SYSTEM_A11=$SYSTEM_A11" >> $GITHUB_ENV
-          echo "SYSTEM_A16=$SYSTEM_A16" >> $GITHUB_ENV
+          echo "=== Decompressed images ==="
+          ls -lh /tmp/a11 /tmp/a16
 
-      - name: Extract key files from system images
+      - name: Extract files from .img using debugfs
         run: |
-          echo "=== Extracting from A11 image ==="
-          debugfs -R "dump /system/build.prop /tmp/build_a11.prop" "$SYSTEM_A11" 2>&1
-          debugfs -R "dump /system/etc/init.rc /tmp/init_a11.rc" "$SYSTEM_A11" 2>&1
-          debugfs -R "dump /system/media/bootanim.rc /tmp/bootanim_a11.rc" "$SYSTEM_A11" 2>&1
+          cd /tmp
+          mkdir -p a11_files a16_files
           
-          echo "=== Extracting from A16 image ==="
-          debugfs -R "dump /system/build.prop /tmp/build_a16.prop" "$SYSTEM_A16" 2>&1
-          debugfs -R "dump /system/etc/init.rc /tmp/init_a16.rc" "$SYSTEM_A16" 2>&1
-          debugfs -R "dump /system/media/bootanim.rc /tmp/bootanim_a16.rc" "$SYSTEM_A16" 2>&1
+          echo "=== Extracting from A11.img ==="
+          debugfs -R "dump /system/build.prop ./a11_files/build.prop" /tmp/a11 2>&1
+          debugfs -R "dump /system/etc/init.rc ./a11_files/init.rc" /tmp/a11 2>&1
+          debugfs -R "ls -p /system/lib64/hw" /tmp/a11 2>&1 | tee ./a11_files/lib64_hw_list.txt
+          debugfs -R "ls -p /system/lib64" /tmp/a11 2>&1 | tee ./a11_files/lib64_list.txt
           
-          echo "=== Files extracted ==="
-          ls -lh /tmp/build_* /tmp/init_* /tmp/bootanim_* 2>/dev/null || echo "Some files may not exist"
+          echo "=== Extracting from A16.img ==="
+          debugfs -R "dump /system/build.prop ./a16_files/build.prop" /tmp/a16 2>&1
+          debugfs -R "dump /system/etc/init.rc ./a16_files/init.rc" /tmp/a16 2>&1
+          debugfs -R "ls -p /system/lib64/hw" /tmp/a16 2>&1 | tee ./a16_files/lib64_hw_list.txt
+          debugfs -R "ls -p /system/lib64" /tmp/a16 2>&1 | tee ./a16_files/lib64_list.txt
+          
+          echo "=== Extracted files ==="
+          find ./a11_files ./a16_files -type f
 
-      - name: List hardware and system libraries
+      - name: Compare and generate summary
         run: |
-          echo "=== A11 /system/lib64/hw ==="
-          debugfs -R "ls -l /system/lib64/hw" "$SYSTEM_A11" 2>&1 | head -30
+          cd /tmp
+          
+          echo "=== build.prop comparison ==="
+          diff -u ./a11_files/build.prop ./a16_files/build.prop || true
           
           echo ""
-          echo "=== A16 /system/lib64/hw ==="
-          debugfs -R "ls -l /system/lib64/hw" "$SYSTEM_A16" 2>&1 | head -30
+          echo "=== init.rc comparison ==="
+          diff -u ./a11_files/init.rc ./a16_files/init.rc || true
           
           echo ""
-          echo "=== A11 /system/lib64 (first 40 entries) ==="
-          debugfs -R "ls -l /system/lib64" "$SYSTEM_A11" 2>&1 | head -40
+          echo "=== /system/lib64/hw directory listing ==="
+          echo "--- A11 ---"
+          cat ./a11_files/lib64_hw_list.txt
+          echo ""
+          echo "--- A16 ---"
+          cat ./a16_files/lib64_hw_list.txt
           
           echo ""
-          echo "=== A16 /system/lib64 (first 40 entries) ==="
-          debugfs -R "ls -l /system/lib64" "$SYSTEM_A16" 2>&1 | head -40
-
-      - name: Extract critical binaries
-        run: |
-          mkdir -p /tmp/bins_a11 /tmp/bins_a16
-          
-          BINARIES="libsurfaceflinger.so hwcomposer.default.so gralloc.default.so libc.so libEGL.so"
-          
-          for bin in $BINARIES; do
-            echo "=== Extracting $bin from A11 ==="
-            debugfs -R "dump /system/lib64/$bin /tmp/bins_a11/$bin" "$SYSTEM_A11" 2>&1 | grep -i "error\|not found" || echo "OK"
-            
-            echo "=== Extracting $bin from A16 ==="
-            debugfs -R "dump /system/lib64/$bin /tmp/bins_a16/$bin" "$SYSTEM_A16" 2>&1 | grep -i "error\|not found" || echo "OK"
-          done
-          
+          echo "=== /system/lib64 directory listing ==="
+          echo "--- A11 ---"
+          head -20 ./a11_files/lib64_list.txt
           echo ""
-          echo "=== Extracted binaries ==="
-          ls -lh /tmp/bins_a11/ /tmp/bins_a16/
-
-      - name: Analyze binary dependencies
-        run: |
-          echo "=== libsurfaceflinger.so A11 dependencies ==="
-          if [ -f /tmp/bins_a11/libsurfaceflinger.so ]; then
-            objdump -p /tmp/bins_a11/libsurfaceflinger.so 2>/dev/null | grep NEEDED | head -20 || echo "objdump failed"
-          else
-            echo "File not found"
-          fi
-          
-          echo ""
-          echo "=== libsurfaceflinger.so A16 dependencies ==="
-          if [ -f /tmp/bins_a16/libsurfaceflinger.so ]; then
-            objdump -p /tmp/bins_a16/libsurfaceflinger.so 2>/dev/null | grep NEEDED | head -20 || echo "objdump failed"
-          else
-            echo "File not found"
-          fi
-          
-          echo ""
-          echo "=== hwcomposer.default.so A11 dependencies ==="
-          if [ -f /tmp/bins_a11/hwcomposer.default.so ]; then
-            objdump -p /tmp/bins_a11/hwcomposer.default.so 2>/dev/null | grep NEEDED | head -20 || echo "objdump failed"
-          else
-            echo "File not found"
-          fi
-          
-          echo ""
-          echo "=== hwcomposer.default.so A16 dependencies ==="
-          if [ -f /tmp/bins_a16/hwcomposer.default.so ]; then
-            objdump -p /tmp/bins_a16/hwcomposer.default.so 2>/dev/null | grep NEEDED | head -20 || echo "objdump failed"
-          else
-            echo "File not found"
-          fi
-
-      - name: Compare configuration files
-        run: |
-          echo "========================================" > /tmp/COMPARISON_SUMMARY.txt
-          echo "ANDROID GSI DIAGNOSTIC COMPARISON" >> /tmp/COMPARISON_SUMMARY.txt
-          echo "========================================" >> /tmp/COMPARISON_SUMMARY.txt
-          echo "" >> /tmp/COMPARISON_SUMMARY.txt
-          
-          echo "BUILD PROPERTIES DIFFERENCES:" >> /tmp/COMPARISON_SUMMARY.txt
-          echo "----------------------------------------" >> /tmp/COMPARISON_SUMMARY.txt
-          if [ -f /tmp/build_a11.prop ] && [ -f /tmp/build_a16.prop ]; then
-            diff -u /tmp/build_a11.prop /tmp/build_a16.prop >> /tmp/COMPARISON_SUMMARY.txt 2>&1 || true
-          else
-            echo "Files not available" >> /tmp/COMPARISON_SUMMARY.txt
-          fi
-          echo "" >> /tmp/COMPARISON_SUMMARY.txt
-          
-          echo "INIT.RC DIFFERENCES:" >> /tmp/COMPARISON_SUMMARY.txt
-          echo "----------------------------------------" >> /tmp/COMPARISON_SUMMARY.txt
-          if [ -f /tmp/init_a11.rc ] && [ -f /tmp/init_a16.rc ]; then
-            diff -u /tmp/init_a11.rc /tmp/init_a16.rc >> /tmp/COMPARISON_SUMMARY.txt 2>&1 || true
-          else
-            echo "Files not available" >> /tmp/COMPARISON_SUMMARY.txt
-          fi
-          echo "" >> /tmp/COMPARISON_SUMMARY.txt
-          
-          cat /tmp/COMPARISON_SUMMARY.txt
+          echo "--- A16 ---"
+          head -20 ./a16_files/lib64_list.txt
