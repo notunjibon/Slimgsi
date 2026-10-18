@@ -19,8 +19,8 @@ jobs:
     steps:
       - name: Install dependencies
         run: |
-          apt-get update
-          apt-get install -y android-sdk-libsparse-utils e2fsprogs wget binutils xz-utils sudo git build-essential
+          sudo apt-get update
+          sudo apt-get install -y android-sdk-libsparse-utils e2fsprogs wget binutils xz-utils git build-essential
           
       - name: Download Android 11 GSI
         run: |
