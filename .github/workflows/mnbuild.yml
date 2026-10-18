@@ -75,21 +75,20 @@ jobs:
           cp workspace/android16/system_raw.img workspace/android16/patched_system.img
           sudo mount -t ext4 -o loop workspace/android16/patched_system.img workspace/patched16
 
-          # Locate Android 11 Binaries and Libs
+          # Define physical target paths inside /system to avoid host symlink resolution errors
           M11_BIN="workspace/mount11/system/bin"
           [ ! -d "$M11_BIN" ] && M11_BIN="workspace/mount11/bin"
 
           M11_LIB="workspace/mount11/system/lib64"
           [ ! -d "$M11_LIB" ] && M11_LIB="workspace/mount11/lib64"
 
-          # Locate Android 16 Target Paths
           P16_BIN="workspace/patched16/system/bin"
-          [ ! -d "$P16_BIN" ] && P16_BIN="workspace/patched16/bin"
+          sudo mkdir -p "$P16_BIN"
 
           P16_LIB="workspace/patched16/system/lib64"
-          [ ! -d "$P16_LIB" ] && P16_LIB="workspace/patched16/lib64"
+          sudo mkdir -p "$P16_LIB"
 
-          echo "1. Injecting hwservicemanager..."
+          echo "1. Injecting hwservicemanager into physical system/bin..."
           if [ -f "$M11_BIN/hwservicemanager" ]; then
             sudo cp -f "$M11_BIN/hwservicemanager" "$P16_BIN/hwservicemanager"
             sudo chmod 755 "$P16_BIN/hwservicemanager"
@@ -99,8 +98,8 @@ jobs:
             echo "⚠️ hwservicemanager not found in Android 11 source."
           fi
 
-          echo "2. Injecting legacy HIDL shared libraries..."
-          if [ -d "$M11_LIB" ] && [ -d "$P16_LIB" ]; then
+          echo "2. Injecting legacy HIDL shared libraries into physical system/lib64..."
+          if [ -d "$M11_LIB" ]; then
             sudo cp -n "$M11_LIB"/*hidl*.so "$P16_LIB/" 2>/dev/null || true
             sudo cp -n "$M11_LIB"/libhwbinder.so "$P16_LIB/" 2>/dev/null || true
             echo "Injected missing HIDL shared libraries into Android 16."
@@ -114,7 +113,7 @@ jobs:
 
       - name: Compress Patched Image to .xz Format
         run: |
-          echo "Compressing patched system image (this may take a few minutes)..."
+          echo "Compressing patched system image to .xz (this may take a few minutes)..."
           xz -T0 -9 workspace/android16/patched_system.img
           ls -lh workspace/android16/patched_system.img.xz
 
