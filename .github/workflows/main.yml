@@ -24,13 +24,21 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             xz-utils \
-            android-tools-fsutils \
+            android-sdk-libsparse-utils \
             libguestfs-tools \
             cpio \
             python3 \
             diffutils \
             tree \
+            libxml2-utils || \
+          sudo apt-get install -y \
+            xz-utils \
             simg2img \
+            libguestfs-tools \
+            cpio \
+            python3 \
+            diffutils \
+            tree \
             libxml2-utils
 
       - name: Create Workspace Directories
@@ -82,7 +90,6 @@ jobs:
 
           def get_hal_list(mount_dir):
               hals = set()
-              # Look for VINTF manifest files
               manifest_paths = [
                   os.path.join(mount_dir, "system/etc/vintf/manifest.xml"),
                   os.path.join(mount_dir, "etc/vintf/manifest.xml")
