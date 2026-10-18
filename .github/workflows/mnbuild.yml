@@ -69,13 +69,13 @@ jobs:
           sudo mount -t ext4 -o loop,ro workspace/android11/system_raw.img workspace/mount11
           sudo mount -t ext4 -o loop,ro workspace/android16/system_raw.img workspace/mount16
 
-      - name: Patch Android 16 GSI via Python (Resolving Symlinks)
+      - name: Patch Android 16 GSI via Python (Guaranteed Directory Creation)
         run: |
           echo "Creating writeable copy of Android 16 system image..."
           cp workspace/android16/system_raw.img workspace/android16/patched_system.img
           sudo mount -t ext4 -o loop workspace/android16/patched_system.img workspace/patched16
 
-          # Run robust Python patcher to bypass host/mount symlink loops
+          # Run robust Python patcher with forced directory creation
           sudo python3 - << 'EOF'
           import os
           import shutil
@@ -84,7 +84,16 @@ jobs:
           mount11 = os.path.realpath("workspace/mount11")
           patched16 = os.path.realpath("workspace/patched16")
 
-          # 1. Locate source bin and lib in Android 11
+          # Explicitly create physical target system directories if missing
+          sys_bin_16 = os.path.join(patched16, "system", "bin")
+          sys_lib_16 = os.path.join(patched16, "system", "lib64")
+          os.makedirs(sys_bin_16, exist_ok=True)
+          os.makedirs(sys_lib_16, exist_ok=True)
+
+          dst_bin = os.path.realpath(sys_bin_16)
+          dst_lib = os.path.realpath(sys_lib_16)
+
+          # Locate source bin and lib in Android 11
           src_bin = None
           for p in [os.path.join(mount11, "system", "bin"), os.path.join(mount11, "bin")]:
               if os.path.exists(os.path.join(p, "hwservicemanager")):
@@ -97,26 +106,11 @@ jobs:
                   src_lib = p
                   break
 
-          # 2. Locate target bin and lib in Patched Android 16 (resolving real paths)
-          dst_bin = None
-          for p in [os.path.join(patched16, "system", "bin"), os.path.join(patched16, "bin")]:
-              real_p = os.path.realpath(p)
-              if os.path.isdir(real_p):
-                  dst_bin = real_p
-                  break
-
-          dst_lib = None
-          for p in [os.path.join(patched16, "system", "lib64"), os.path.join(patched16, "lib64")]:
-              real_p = os.path.realpath(p)
-              if os.path.isdir(real_p):
-                  dst_lib = real_p
-                  break
-
           print(f"Source Bin: {src_bin}")
           print(f"Target Bin: {dst_bin}")
 
-          # 3. Inject hwservicemanager
-          if src_bin and dst_bin:
+          # 1. Inject hwservicemanager
+          if src_bin:
               src_file = os.path.join(src_bin, "hwservicemanager")
               dst_file = os.path.join(dst_bin, "hwservicemanager")
               if os.path.exists(src_file):
@@ -126,21 +120,22 @@ jobs:
                   print("✅ Successfully injected hwservicemanager")
               else:
                   print("⚠️ hwservicemanager binary not found in source Android 11 bin.")
+          else:
+              print("⚠️ Source Bin not found.")
 
-          # 4. Inject legacy HIDL shared libraries (*hidl*.so, libhwbinder.so)
-          if src_lib and dst_lib:
+          # 2. Inject legacy HIDL shared libraries (*hidl*.so, libhwbinder.so)
+          if src_lib:
               libs_to_copy = glob.glob(os.path.join(src_lib, "*hidl*.so")) + glob.glob(os.path.join(src_lib, "libhwbinder.so"))
               count = 0
               for lib in libs_to_copy:
                   dst_lib_file = os.path.join(dst_lib, os.path.basename(lib))
-                  if not os.path.exists(dst_lib_file):
-                      shutil.copy2(lib, dst_lib_file)
-                      os.chmod(dst_lib_file, 0o644)
-                      os.chown(dst_lib_file, 0, 0)
-                      count += 1
+                  shutil.copy2(lib, dst_lib_file)
+                  os.chmod(dst_lib_file, 0o644)
+                  os.chown(dst_lib_file, 0, 0)
+                  count += 1
               print(f"✅ Successfully injected {count} legacy HIDL libraries into Android 16.")
           else:
-              print("⚠️ Could not locate library directories.")
+              print("⚠️ Source Library path not found.")
 
           EOF
 
@@ -148,7 +143,7 @@ jobs:
           sudo umount workspace/patched16
           sudo umount workspace/mount11
           sudo umount workspace/mount16
-          echo "Patching complete successfully."
+          echo "Patching completed successfully."
 
       - name: Compress Patched Image to .xz Format
         run: |
