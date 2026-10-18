@@ -1,209 +1,173 @@
-name: Diagnose Android 16 GSI Boot Issues
+name: Android GSI Diagnostic Workflow
 
 on:
   workflow_dispatch:
     inputs:
       a11_url:
-        description: 'Android 11 GSI .xz URL'
+        description: 'Android 11 GSI download URL'
         required: true
         type: string
       a16_url:
-        description: 'Android 16 GSI .xz URL'
+        description: 'Android 16 GSI download URL'
         required: true
         type: string
 
 jobs:
-  diagnose:
+  diagnose-gsi:
     runs-on: ubuntu-latest
-    container:
-      image: ubuntu:22.04
     
     steps:
       - name: Install dependencies
         run: |
           apt-get update
-          apt-get install -y android-sdk-libsparse-utils e2fsprogs wget binutils xz-utils sudo
+          apt-get install -y android-sdk-libsparse-utils e2fsprogs wget binutils xz-utils sudo git build-essential
           
-      - name: Download and extract GSI images
+      - name: Download Android 11 GSI
         run: |
-          wget '${{ inputs.a11_url }}' -O a11.img.xz
-          wget '${{ inputs.a16_url }}' -O a16.img.xz
+          cd /tmp
+          wget -O a11.xz '${{ inputs.a11_url }}'
+          ls -lh a11.xz
           
-          echo "Extracting .xz files..."
-          xz -d a11.img.xz
-          xz -d a16.img.xz
-          
-          echo "Converting sparse images to raw..."
-          simg2img a11.img a11.raw.img || cp a11.img a11.raw.img
-          simg2img a16.img a16.raw.img || cp a16.img a16.raw.img
-          
-          mkdir -p /mnt/a11 /mnt/a16
-          
-      - name: Mount images
+      - name: Download Android 16 GSI
         run: |
-          sudo mount -o loop,ro a11.raw.img /mnt/a11
-          sudo mount -o loop,ro a16.raw.img /mnt/a16
+          cd /tmp
+          wget -O a16.xz '${{ inputs.a16_url }}'
+          ls -lh a16.xz
           
-          echo "=== Mount verification ==="
-          df /mnt/a11 /mnt/a16
-          
-      - name: Compare HAL files
+      - name: Decompress GSI images
         run: |
-          echo "=== Android 11 HAL files ==="
-          find /mnt/a11/vendor/lib* -name "*hwcomposer*" -o -name "*gralloc*" 2>/dev/null | head -10
+          cd /tmp
+          xz -d a11.xz
+          xz -d a16.xz
+          file a11.raw.img
+          file a16.raw.img
+          ls -lh a11.raw.img a16.raw.img
           
-          echo "=== Android 16 HAL files ==="
-          find /mnt/a16/vendor/lib* -name "*hwcomposer*" -o -name "*gralloc*" 2>/dev/null | head -10
-          
-          echo "=== Detailed comparison ==="
-          echo "A11 hwcomposer:"
-          ls -lh /mnt/a11/vendor/lib*/hw/hwcomposer* 2>/dev/null || echo "Not found"
-          
-          echo "A16 hwcomposer:"
-          ls -lh /mnt/a16/vendor/lib*/hw/hwcomposer* 2>/dev/null || echo "Not found"
-          
-      - name: Check library dependencies
+      - name: Extract and inspect Android 11 GSI
         run: |
-          echo "=== A11 libc ==="
-          file /mnt/a11/system/lib*/libc.so 2>/dev/null || echo "Not found"
+          cd /tmp
           
-          echo "=== A16 libc ==="
-          file /mnt/a16/system/lib*/libc.so 2>/dev/null || echo "Not found"
+          # List directory structure
+          debugfs -R "ls -p /system/lib64/hw" a11.raw.img > a11_hw_libs.txt 2>/dev/null || true
+          debugfs -R "ls -p /system/lib64" a11.raw.img > a11_system_libs.txt 2>/dev/null || true
           
-          echo "=== A11 EGL/GLES ==="
-          ls -lh /mnt/a11/system/lib*/libEGL* /mnt/a11/system/lib*/libGLES* 2>/dev/null || echo "Not found"
+          # Extract key files
+          debugfs -R "dump /system/lib64/libsurfaceflinger.so ./libsurfaceflinger_a11.so" a11.raw.img 2>/dev/null || true
+          debugfs -R "dump /system/lib64/hw/hwcomposer.default.so ./hwcomposer_a11.so" a11.raw.img 2>/dev/null || true
+          debugfs -R "dump /system/lib64/hw/gralloc.default.so ./gralloc_a11.so" a11.raw.img 2>/dev/null || true
+          debugfs -R "dump /system/lib64/libc.so ./libc_a11.so" a11.raw.img 2>/dev/null || true
+          debugfs -R "dump /system/lib64/libEGL.so ./libEGL_a11.so" a11.raw.img 2>/dev/null || true
           
-          echo "=== A16 EGL/GLES ==="
-          ls -lh /mnt/a16/system/lib*/libEGL* /mnt/a16/system/lib*/libGLES* 2>/dev/null || echo "Not found"
+          # Extract configuration files
+          debugfs -R "dump /system/build.prop ./build_a11.prop" a11.raw.img 2>/dev/null || true
+          debugfs -R "dump /init.rc ./init_a11.rc" a11.raw.img 2>/dev/null || true
+          debugfs -R "dump /system/etc/init/bootanim.rc ./bootanim_a11.rc" a11.raw.img 2>/dev/null || true
           
-      - name: Compare system libraries
+          ls -lh libsurfaceflinger_a11.so hwcomposer_a11.so build_a11.prop init_a11.rc 2>/dev/null || echo "Some A11 files not extracted"
+          
+      - name: Extract and inspect Android 16 GSI
         run: |
-          echo "=== Library version strings comparison ==="
+          cd /tmp
           
-          echo "A11 libc symbols:"
-          nm -D /mnt/a11/system/lib64/libc.so 2>/dev/null | grep -i "GLIBC\|version" | head -5 || echo "N/A"
+          # List directory structure
+          debugfs -R "ls -p /system/lib64/hw" a16.raw.img > a16_hw_libs.txt 2>/dev/null || true
+          debugfs -R "ls -p /system/lib64" a16.raw.img > a16_system_libs.txt 2>/dev/null || true
           
-          echo "A16 libc symbols:"
-          nm -D /mnt/a16/system/lib64/libc.so 2>/dev/null | grep -i "GLIBC\|version" | head -5 || echo "N/A"
+          # Extract key files
+          debugfs -R "dump /system/lib64/libsurfaceflinger.so ./libsurfaceflinger_a16.so" a16.raw.img 2>/dev/null || true
+          debugfs -R "dump /system/lib64/hw/hwcomposer.default.so ./hwcomposer_a16.so" a16.raw.img 2>/dev/null || true
+          debugfs -R "dump /system/lib64/hw/gralloc.default.so ./gralloc_a16.so" a16.raw.img 2>/dev/null || true
+          debugfs -R "dump /system/lib64/libc.so ./libc_a16.so" a16.raw.img 2>/dev/null || true
+          debugfs -R "dump /system/lib64/libEGL.so ./libEGL_a16.so" a16.raw.img 2>/dev/null || true
           
-      - name: Check init scripts
+          # Extract configuration files
+          debugfs -R "dump /system/build.prop ./build_a16.prop" a16.raw.img 2>/dev/null || true
+          debugfs -R "dump /init.rc ./init_a16.rc" a16.raw.img 2>/dev/null || true
+          debugfs -R "dump /system/etc/init/bootanim.rc ./bootanim_a16.rc" a16.raw.img 2>/dev/null || true
+          
+          ls -lh libsurfaceflinger_a16.so hwcomposer_a16.so build_a16.prop init_a16.rc 2>/dev/null || echo "Some A16 files not extracted"
+          
+      - name: Compare extracted files
         run: |
-          echo "=== Init script comparison ==="
+          cd /tmp
           
-          echo "A11 init files:"
-          find /mnt/a11/system/etc/init* -type f 2>/dev/null | grep -E "bootanim|graphics|hwc|display" || echo "Not found"
+          echo "=== Comparing build.prop ===" && diff -u build_a11.prop build_a16.prop > build_prop_diff.txt 2>&1 || true
+          echo "=== Comparing init.rc ===" && diff -u init_a11.rc init_a16.rc > init_rc_diff.txt 2>&1 || true
+          echo "=== Comparing bootanim.rc ===" && diff -u bootanim_a11.rc bootanim_a16.rc > bootanim_rc_diff.txt 2>&1 || true
           
-          echo "A16 init files:"
-          find /mnt/a16/system/etc/init* -type f 2>/dev/null | grep -E "bootanim|graphics|hwc|display" || echo "Not found"
+          echo "=== Hardware library differences ===" && diff -u a11_hw_libs.txt a16_hw_libs.txt > hw_libs_diff.txt 2>&1 || true
+          echo "=== System library differences ===" && diff -u a11_system_libs.txt a16_system_libs.txt > system_libs_diff.txt 2>&1 || true
           
-          echo "=== A11 bootanim.rc ==="
-          cat /mnt/a11/system/etc/init/bootanim.rc 2>/dev/null || echo "Not found"
+          cat build_prop_diff.txt
+          cat init_rc_diff.txt
+          cat hw_libs_diff.txt
           
-          echo "=== A16 bootanim.rc ==="
-          cat /mnt/a16/system/etc/init/bootanim.rc 2>/dev/null || echo "Not found"
-          
-      - name: Compare build.prop
+      - name: Analyze binary differences
         run: |
-          echo "=== Graphics-related properties (A11) ==="
-          grep -i "graphics\|hwc\|display\|ro.surface\|ro.hardware" /mnt/a11/system/build.prop 2>/dev/null || echo "None found"
+          cd /tmp
           
-          echo "=== Graphics-related properties (A16) ==="
-          grep -i "graphics\|hwc\|display\|ro.surface\|ro.hardware" /mnt/a16/system/build.prop 2>/dev/null || echo "None found"
+          echo "=== libsurfaceflinger.so ===" | tee binary_analysis.txt
+          ( file libsurfaceflinger_a11.so && file libsurfaceflinger_a16.so ) >> binary_analysis.txt 2>&1 || echo "Files not extracted" >> binary_analysis.txt
           
-      - name: Check SELinux
+          echo "" >> binary_analysis.txt
+          echo "=== hwcomposer.so ===" >> binary_analysis.txt
+          ( file hwcomposer_a11.so && file hwcomposer_a16.so ) >> binary_analysis.txt 2>&1 || echo "Files not extracted" >> binary_analysis.txt
+          
+          echo "" >> binary_analysis.txt
+          echo "=== libsurfaceflinger.so A11 dependencies ===" >> binary_analysis.txt
+          ( objdump -p libsurfaceflinger_a11.so 2>/dev/null | grep NEEDED ) >> binary_analysis.txt 2>&1 || echo "A11 analysis failed" >> binary_analysis.txt
+          
+          echo "" >> binary_analysis.txt
+          echo "=== libsurfaceflinger.so A16 dependencies ===" >> binary_analysis.txt
+          ( objdump -p libsurfaceflinger_a16.so 2>/dev/null | grep NEEDED ) >> binary_analysis.txt 2>&1 || echo "A16 analysis failed" >> binary_analysis.txt
+          
+          cat binary_analysis.txt
+          
+      - name: Generate comparison summary
         run: |
-          echo "=== SELinux policy files ==="
-          echo "A11:"
-          ls -la /mnt/a11/system/etc/selinux/ 2>/dev/null || echo "Not found"
+          cd /tmp
           
-          echo "A16:"
-          ls -la /mnt/a16/system/etc/selinux/ 2>/dev/null || echo "Not found"
+          cat > COMPARISON_SUMMARY.txt << 'EOF'
+          ========================================
+          ANDROID GSI DIAGNOSTIC COMPARISON
+          ========================================
           
-          echo "=== SELinux policy sizes ==="
-          wc -c /mnt/a11/system/etc/selinux/sepolicy 2>/dev/null || echo "Not found"
-          wc -c /mnt/a16/system/etc/selinux/sepolicy 2>/dev/null || echo "Not found"
-          
-      - name: Check vendor partition
-        run: |
-          echo "=== Vendor partition overview ==="
-          echo "A11 vendor contents:"
-          du -sh /mnt/a11/vendor/* 2>/dev/null | sort -h | tail -10 || echo "Not found"
-          
-          echo "A16 vendor contents:"
-          du -sh /mnt/a16/vendor/* 2>/dev/null | sort -h | tail -10 || echo "Not found"
-          
-          echo "=== Vendor lib comparison ==="
-          echo "A11 vendor/lib* dirs:"
-          ls -d /mnt/a11/vendor/lib* 2>/dev/null || echo "Not found"
-          
-          echo "A16 vendor/lib* dirs:"
-          ls -d /mnt/a16/vendor/lib* 2>/dev/null || echo "Not found"
-          
-      - name: Check framework files
-        run: |
-          echo "=== Framework comparison ==="
-          echo "A11 libsurfaceflinger.so:"
-          ls -lh /mnt/a11/system/lib*/libsurfaceflinger.so 2>/dev/null || echo "Not found"
-          
-          echo "A16 libsurfaceflinger.so:"
-          ls -lh /mnt/a16/system/lib*/libsurfaceflinger.so 2>/dev/null || echo "Not found"
-          
-          echo "=== Boot animation binary ==="
-          echo "A11 bootanimation:"
-          ls -lh /mnt/a11/system/bin/bootanimation 2>/dev/null || echo "Not found"
-          
-          echo "A16 bootanimation:"
-          ls -lh /mnt/a16/system/bin/bootanimation 2>/dev/null || echo "Not found"
-          
-      - name: Generate diagnostic summary
-        run: |
-          cat > diagnostic_summary.txt << 'EOF'
-          Android GSI Boot Issue Diagnostic Report
-          ==========================================
-          
-          INVESTIGATION CHECKLIST:
-          
-          1. HAL Compatibility
-             - Check if hwcomposer/gralloc exist in both versions
-             - Check if they're different sizes (size mismatch = likely incompatible)
-             
-          2. System Library Versions
-             - libc.so size difference indicates ABI incompatibility
-             - EGL/GLES library presence and sizes
-             
-          3. Init Scripts
-             - Look for syntax differences in bootanim.rc
-             - Check if service definitions match
-             
-          4. SELinux
-             - Check if sepolicy files exist and sizes match
-             - Different sizes = likely policy conflicts
-             
-          5. Vendor Partition
-             - Check if vendor/lib64 vs vendor/lib structure differs
-             - Missing vendor/lib directories can break HAL loading
-             
-          6. Build Properties
-             - Look for ro.hardware, ro.board.platform differences
-             - These affect HAL selection
-          
-          LIKELY CULPRITS (in order):
-          - Missing vendor/lib64 directory (A16 may require 64-bit libs)
-          - libc.so version mismatch (check file sizes)
-          - SELinux policy incompatibility (size difference = high risk)
-          - Missing or incompatible bootanimation binary
-          - hwcomposer/gralloc HAL incompatibility
+          BUILD PROPERTIES DIFFERENCES:
+          ----------------------------------------
           EOF
-          cat diagnostic_summary.txt
           
-      - name: Unmount images
-        if: always()
-        run: |
-          sudo umount /mnt/a11 2>/dev/null || true
-          sudo umount /mnt/a16 2>/dev/null || true
+          cat build_prop_diff.txt >> COMPARISON_SUMMARY.txt 2>/dev/null || echo "No differences found" >> COMPARISON_SUMMARY.txt
           
-      - name: Upload diagnostic results
-        uses: actions/upload-artifact@v4
-        with:
-          name: diagnostic-results
-          path: diagnostic_summary.txt
+          cat >> COMPARISON_SUMMARY.txt << 'EOF'
+          
+          INIT.RC DIFFERENCES:
+          ----------------------------------------
+          EOF
+          
+          cat init_rc_diff.txt >> COMPARISON_SUMMARY.txt 2>/dev/null || echo "No differences found" >> COMPARISON_SUMMARY.txt
+          
+          cat >> COMPARISON_SUMMARY.txt << 'EOF'
+          
+          HARDWARE LIBRARY DIFFERENCES:
+          ----------------------------------------
+          EOF
+          
+          cat hw_libs_diff.txt >> COMPARISON_SUMMARY.txt 2>/dev/null || echo "No differences found" >> COMPARISON_SUMMARY.txt
+          
+          cat >> COMPARISON_SUMMARY.txt << 'EOF'
+          
+          SYSTEM LIBRARY DIFFERENCES:
+          ----------------------------------------
+          EOF
+          
+          cat system_libs_diff.txt >> COMPARISON_SUMMARY.txt 2>/dev/null || echo "No differences found" >> COMPARISON_SUMMARY.txt
+          
+          cat >> COMPARISON_SUMMARY.txt << 'EOF'
+          
+          BINARY ANALYSIS:
+          ----------------------------------------
+          EOF
+          
+          cat binary_analysis.txt >> COMPARISON_SUMMARY.txt 2>/dev/null || true
+          
+          cat COMPARISON_SUMMARY.txt
