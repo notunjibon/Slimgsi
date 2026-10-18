@@ -1,0 +1,137 @@
+name: Patch Android 16 GSI & Publish .xz Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      gsi_url_android11:
+        description: 'Direct download URL for working Android 11 GSI (.xz)'
+        required: true
+        type: string
+      gsi_url_android16:
+        description: 'Direct download URL for non-booting Android 16 GSI (.xz)'
+        required: true
+        type: string
+      release_tag:
+        description: 'Release Tag (e.g. v16-patched-gsi)'
+        required: true
+        default: 'v16-patched-gsi'
+
+jobs:
+  patch-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Required to create GitHub Releases
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            xz-utils \
+            android-sdk-libsparse-utils \
+            libguestfs-tools \
+            cpio \
+            python3 \
+            tree \
+            gh
+
+      - name: Create Workspace Directories
+        run: |
+          mkdir -p workspace/android11 workspace/android16 workspace/mount11 workspace/mount16 workspace/patched16
+
+      - name: Download & Extract Android 11 GSI (Working Reference)
+        run: |
+          echo "Downloading Android 11 GSI..."
+          curl -L --fail --retry 3 "${{ inputs.gsi_url_android11 }}" -o workspace/android11/gsi.img.xz
+          unxz workspace/android11/gsi.img.xz
+          if file workspace/android11/gsi.img | grep -q "sparse"; then
+            simg2img workspace/android11/gsi.img workspace/android11/system_raw.img
+          else
+            cp workspace/android11/gsi.img workspace/android11/system_raw.img
+          fi
+
+      - name: Download & Extract Android 16 GSI (Target)
+        run: |
+          echo "Downloading Android 16 GSI..."
+          curl -L --fail --retry 3 "${{ inputs.gsi_url_android16 }}" -o workspace/android16/gsi.img.xz
+          unxz workspace/android16/gsi.img.xz
+          if file workspace/android16/gsi.img | grep -q "sparse"; then
+            simg2img workspace/android16/gsi.img workspace/android16/system_raw.img
+          else
+            cp workspace/android16/gsi.img workspace/android16/system_raw.img
+          fi
+
+      - name: Mount Extracted ext4 Images
+        run: |
+          sudo mount -t ext4 -o loop,ro workspace/android11/system_raw.img workspace/mount11
+          sudo mount -t ext4 -o loop,ro workspace/android16/system_raw.img workspace/mount16
+
+      - name: Patch Android 16 GSI (Injecting hwservicemanager & HIDL Libraries)
+        run: |
+          echo "Creating writeable copy of Android 16 system image..."
+          cp workspace/android16/system_raw.img workspace/android16/patched_system.img
+          sudo mount -t ext4 -o loop workspace/android16/patched_system.img workspace/patched16
+
+          # Locate Android 11 Binaries and Libs
+          M11_BIN="workspace/mount11/system/bin"
+          [ ! -d "$M11_BIN" ] && M11_BIN="workspace/mount11/bin"
+
+          M11_LIB="workspace/mount11/system/lib64"
+          [ ! -d "$M11_LIB" ] && M11_LIB="workspace/mount11/lib64"
+
+          # Locate Android 16 Target Paths
+          P16_BIN="workspace/patched16/system/bin"
+          [ ! -d "$P16_BIN" ] && P16_BIN="workspace/patched16/bin"
+
+          P16_LIB="workspace/patched16/system/lib64"
+          [ ! -d "$P16_LIB" ] && P16_LIB="workspace/patched16/lib64"
+
+          echo "1. Injecting hwservicemanager..."
+          if [ -f "$M11_BIN/hwservicemanager" ]; then
+            sudo cp -f "$M11_BIN/hwservicemanager" "$P16_BIN/hwservicemanager"
+            sudo chmod 755 "$P16_BIN/hwservicemanager"
+            sudo chown root:root "$P16_BIN/hwservicemanager"
+            echo "Successfully injected hwservicemanager."
+          else
+            echo "⚠️ hwservicemanager not found in Android 11 source."
+          fi
+
+          echo "2. Injecting legacy HIDL shared libraries..."
+          if [ -d "$M11_LIB" ] && [ -d "$P16_LIB" ]; then
+            sudo cp -n "$M11_LIB"/*hidl*.so "$P16_LIB/" 2>/dev/null || true
+            sudo cp -n "$M11_LIB"/libhwbinder.so "$P16_LIB/" 2>/dev/null || true
+            echo "Injected missing HIDL shared libraries into Android 16."
+          fi
+
+          sync
+          sudo umount workspace/patched16
+          sudo umount workspace/mount11
+          sudo umount workspace/mount16
+          echo "Patching complete."
+
+      - name: Compress Patched Image to .xz Format
+        run: |
+          echo "Compressing patched system image (this may take a few minutes)..."
+          xz -T0 -9 workspace/android16/patched_system.img
+          ls -lh workspace/android16/patched_system.img.xz
+
+      - name: Publish GitHub Release & Upload .xz Asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ inputs.release_tag }}"
+          echo "Preparing release for tag: $TAG"
+
+          # Delete existing tag/release if re-running
+          git tag -d "$TAG" 2>/dev/null || true
+          git push origin ":refs/tags/$TAG" 2>/dev/null || true
+          gh release delete "$TAG" --cleanup-tag -y 2>/dev/null || true
+
+          # Create release and upload .xz asset
+          gh release create "$TAG" \
+            workspace/android16/patched_system.img.xz \
+            --title "Android 16 Patched GSI for Older Vendors ($TAG)" \
+            --notes "Automated patch restoring legacy HIDL infrastructure (hwservicemanager, hidl.manager, hidl.token and companion .so libraries) to allow booting Android 16 GSI on Android 9/11 vendor partitions."
