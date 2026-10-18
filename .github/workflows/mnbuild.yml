@@ -64,10 +64,15 @@ jobs:
             cp workspace/android16/gsi.img workspace/android16/system_raw.img
           fi
 
+      - name: Prepare Writeable Copy of Android 16 Image
+        run: |
+          echo "Creating writeable patched_system.img copy..."
+          cp workspace/android16/system_raw.img workspace/android16/patched_system.img
+
       - name: Mount Extracted ext4 Images
         run: |
           sudo mount -t ext4 -o loop,ro workspace/android11/system_raw.img workspace/mount11
-          sudo mount -t ext4 -o loop workspace/android16/system_raw.img workspace/patched16
+          sudo mount -t ext4 -o loop workspace/android16/patched_system.img workspace/patched16
 
       - name: Patch Android 16 GSI via Dynamic Path Python Patcher
         run: |
@@ -114,7 +119,6 @@ jobs:
 
           # 1. Inject hwservicemanager
           if src_hw and patched_bins:
-              # Prefer a path containing 'system' if available, otherwise use the first discovered bin
               target_bin_dir = next((b for b in patched_bins if "system" in b), patched_bins[0])
               dst_hw = os.path.join(target_bin_dir, "hwservicemanager")
               os.makedirs(target_bin_dir, exist_ok=True)
