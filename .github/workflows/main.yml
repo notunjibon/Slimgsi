@@ -39,9 +39,10 @@ jobs:
           cd /tmp
           xz -d a11.xz
           xz -d a16.xz
-          file a11.raw.img
-          file a16.raw.img
-          ls -lh a11.raw.img a16.raw.img
+          echo "=== Files in /tmp after decompression ===" 
+          ls -lh /tmp/ | grep -E "^-" | head -20
+          echo "=== Checking for *.img files ===" 
+          find /tmp -maxdepth 1 -name "*.img" -o -name "a11*" -o -name "a16*" 2>/dev/null | sort
           
       - name: Extract and inspect Android 11 GSI
         run: |
