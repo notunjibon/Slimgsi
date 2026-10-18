@@ -1,84 +1,201 @@
-name: Android GSI Diagnostic
+name: GSI Boot Chain & HAL Comparison (Android 11 vs Android 16)
 
 on:
   workflow_dispatch:
     inputs:
-      a11_url:
-        description: 'Android 11 GSI download URL'
+      gsi_url_android11:
+        description: 'Direct download URL for working Android 11 GSI (.xz)'
         required: true
         type: string
-      a16_url:
-        description: 'Android 16 GSI download URL'
+      gsi_url_android16:
+        description: 'Direct download URL for non-booting Android 16 GSI (.xz)'
         required: true
         type: string
 
 jobs:
-  diagnose:
-    runs-on: ubuntu-22.04
+  compare-gsis:
+    runs-on: ubuntu-latest
     steps:
-      - name: Install dependencies
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y xz-utils android-sdk-libsparse-utils binutils
+          sudo apt-get install -y \
+            xz-utils \
+            android-tools-fsutils \
+            libguestfs-tools \
+            cpio \
+            python3 \
+            diffutils \
+            tree \
+            simg2img \
+            libxml2-utils
 
-      - name: Download and decompress GSI images
+      - name: Create Workspace Directories
         run: |
-          cd /tmp
-          
-          echo "=== Downloading A11 ==="
-          wget -q -O a11.xz "${{ github.event.inputs.a11_url }}"
-          xz -d a11.xz
-          
-          echo "=== Downloading A16 ==="
-          wget -q -O a16.xz "${{ github.event.inputs.a16_url }}"
-          xz -d a16.xz
-          
-          echo "=== Decompressed images ==="
-          ls -lh /tmp/a11 /tmp/a16
+          mkdir -p workspace/android11 workspace/android16 workspace/mount11 workspace/mount16 reports
 
-      - name: Extract files from .img using debugfs
+      - name: Download & Extract Android 11 GSI
         run: |
-          cd /tmp
-          mkdir -p a11_files a16_files
-          
-          echo "=== Extracting from A11.img ==="
-          debugfs -R "dump /system/build.prop ./a11_files/build.prop" /tmp/a11 2>&1
-          debugfs -R "dump /system/etc/init.rc ./a11_files/init.rc" /tmp/a11 2>&1
-          debugfs -R "ls -p /system/lib64/hw" /tmp/a11 2>&1 | tee ./a11_files/lib64_hw_list.txt
-          debugfs -R "ls -p /system/lib64" /tmp/a11 2>&1 | tee ./a11_files/lib64_list.txt
-          
-          echo "=== Extracting from A16.img ==="
-          debugfs -R "dump /system/build.prop ./a16_files/build.prop" /tmp/a16 2>&1
-          debugfs -R "dump /system/etc/init.rc ./a16_files/init.rc" /tmp/a16 2>&1
-          debugfs -R "ls -p /system/lib64/hw" /tmp/a16 2>&1 | tee ./a16_files/lib64_hw_list.txt
-          debugfs -R "ls -p /system/lib64" /tmp/a16 2>&1 | tee ./a16_files/lib64_list.txt
-          
-          echo "=== Extracted files ==="
-          find ./a11_files ./a16_files -type f
+          echo "Downloading Android 11 GSI..."
+          curl -L --retry 3 "${{ inputs.gsi_url_android11 }}" -o workspace/android11/gsi.img.xz
+          unxz workspace/android11/gsi.img.xz
+          if file workspace/android11/gsi.img | grep -q "sparse"; then
+            simg2img workspace/android11/gsi.img workspace/android11/system_raw.img
+          else
+            cp workspace/android11/gsi.img workspace/android11/system_raw.img
+          fi
 
-      - name: Compare and generate summary
+      - name: Download & Extract Android 16 GSI
         run: |
-          cd /tmp
-          
-          echo "=== build.prop comparison ==="
-          diff -u ./a11_files/build.prop ./a16_files/build.prop || true
-          
-          echo ""
-          echo "=== init.rc comparison ==="
-          diff -u ./a11_files/init.rc ./a16_files/init.rc || true
-          
-          echo ""
-          echo "=== /system/lib64/hw directory listing ==="
-          echo "--- A11 ---"
-          cat ./a11_files/lib64_hw_list.txt
-          echo ""
-          echo "--- A16 ---"
-          cat ./a16_files/lib64_hw_list.txt
-          
-          echo ""
-          echo "=== /system/lib64 directory listing ==="
-          echo "--- A11 ---"
-          head -20 ./a11_files/lib64_list.txt
-          echo ""
-          echo "--- A16 ---"
-          head -20 ./a16_files/lib64_list.txt
+          echo "Downloading Android 16 GSI..."
+          curl -L --retry 3 "${{ inputs.gsi_url_android16 }}" -o workspace/android16/gsi.img.xz
+          unxz workspace/android16/gsi.img.xz
+          if file workspace/android16/gsi.img | grep -q "sparse"; then
+            simg2img workspace/android16/gsi.img workspace/android16/system_raw.img
+          else
+            cp workspace/android16/gsi.img workspace/android16/system_raw.img
+          fi
+
+      - name: Mount Extracted GSI System Images
+        run: |
+          sudo guestmount -a workspace/android11/system_raw.img -m /dev/sda workspace/mount11 --ro || \
+          sudo mount -o loop,ro workspace/android11/system_raw.img workspace/mount11 || true
+
+          sudo guestmount -a workspace/android16/system_raw.img -m /dev/sda workspace/mount16 --ro || \
+          sudo mount -o loop,ro workspace/android16/system_raw.img workspace/mount16 || true
+
+      - name: Analyze Boot Chain & HALs (Power-On to Home Screen)
+        run: |
+          python3 - << 'EOF' > reports/boot_execution_comparison.md
+          import os
+          import glob
+          import xml.etree.ElementTree as ET
+
+          mount11 = "workspace/mount11"
+          mount16 = "workspace/mount16"
+
+          def check_path(base, path):
+              return os.path.exists(os.path.join(base, path))
+
+          def get_hal_list(mount_dir):
+              hals = set()
+              # Look for VINTF manifest files
+              manifest_paths = [
+                  os.path.join(mount_dir, "system/etc/vintf/manifest.xml"),
+                  os.path.join(mount_dir, "etc/vintf/manifest.xml")
+              ]
+              for mp in manifest_paths:
+                  if os.path.exists(mp):
+                      try:
+                          tree = ET.parse(mp)
+                          root = tree.getroot()
+                          for hal in root.findall(".//hal"):
+                              name_elem = hal.find("name")
+                              if name_elem is not None and name_elem.text:
+                                  hals.add(name_elem.text)
+                      except Exception as e:
+                          print(f"Error parsing {mp}: {e}")
+              return hals
+
+          hals_11 = get_hal_list(mount11)
+          hals_16 = get_hal_list(mount16)
+
+          with open("reports/boot_execution_comparison.md", "w") as f:
+              f.write("# Android 11 vs Android 16 GSI Boot Chain & HAL Analysis\n\n")
+              f.write("This report details the full boot chain execution path and performs a rigorous comparison of **Hardware Abstraction Layers (HALs)** and VINTF interface requirements between the working Android 11 GSI and the non-booting Android 16 GSI.\n\n")
+
+              # 1. Init & Power-on
+              f.write("## 1. Power-On & Kernel Handover (Init Stage)\n")
+              init_11 = check_path(mount11, "init")
+              init_16 = check_path(mount16, "init")
+              f.write(f"- Android 11 `init` binary present: `{init_11}`\n")
+              f.write(f"- Android 16 `init` binary present: `{init_16}`\n\n")
+
+              rcs_11 = len(glob.glob(f"{mount11}/etc/init/*.rc") + glob.glob(f"{mount11}/init*.rc"))
+              rcs_16 = len(glob.glob(f"{mount16}/etc/init/*.rc") + glob.glob(f"{mount16}/init*.rc"))
+              f.write(f"- Android 11 Init config count: `{rcs_11}`\n")
+              f.write(f"- Android 16 Init config count: `{rcs_16}`\n\n")
+
+              # 2. HAL & VINTF Compatibility Analysis
+              f.write("## 2. Hardware Abstraction Layer (HAL) & VINTF Analysis\n")
+              f.write("A primary root cause of boot failure when running a newer GSI on an older vendor partition is **HAL version mismatch or missing interface requirements** in the VINTF manifest.\n\n")
+              f.write(f"- Android 11 GSI Declared HALs count: `{len(hals_11)}`\n")
+              f.write(f"- Android 16 GSI Declared HALs count: `{len(hals_16)}`\n\n")
+
+              common_hals = hals_11.intersection(hals_16)
+              only_11 = hals_11 - hals_16
+              only_16 = hals_16 - hals_11
+
+              f.write("### HAL Delta Breakdown\n")
+              f.write(f"- **HALs present in both**: `{len(common_hals)}`\n")
+              f.write(f"- **HALs exclusive to Android 11 GSI**: `{len(only_11)}`\n")
+              f.write(f"- **HALs exclusive to Android 16 GSI (New/Updated)**: `{len(only_16)}`\n\n")
+
+              if only_16:
+                  f.write("#### New/Modified HALs required by Android 16 GSI (Potential Blockers if missing from Android 11 Vendor partition):\n")
+                  for h in sorted(only_16):
+                      f.write(f"  - `{h}`\n")
+                  f.write("\n")
+
+              if only_11:
+                  f.write("#### Deprecated/Removed HALs in Android 16 GSI:\n")
+                  for h in sorted(only_11):
+                      f.write(f"  - `{h}`\n")
+                  f.write("\n")
+
+              # 3. Core Daemons
+              f.write("## 3. Core Daemons & Native Services Execution Chain\n")
+              f.write("| Service / Binary Path | Android 11 | Android 16 |\n")
+              f.write("|---|---|---|\n")
+              
+              services = [
+                  "bin/servicemanager",
+                  "bin/hwservicemanager",
+                  "bin/android.hidl.manager@1.0-service",
+                  "bin/surfaceflinger",
+                  "bin/vold",
+                  "bin/netd",
+                  "bin/zygote32",
+                  "bin/zygote64"
+              ]
+              for svc in services:
+                  s11 = check_path(mount11, svc) or check_path(mount11, f"system/{svc}")
+                  s16 = check_path(mount16, svc) or check_path(mount16, f"system/{svc}")
+                  f.write(f"| `{svc}` | {'✅' if s11 else '❌'} | {'✅' if s16 else '❌'} |\n")
+
+              # 4. Boot Animation
+              f.write("\n## 4. Boot Animation Subsystem\n")
+              anim_bin_11 = check_path(mount11, "bin/bootanimation") or check_path(mount11, "system/bin/bootanimation")
+              anim_bin_16 = check_path(mount16, "bin/bootanimation") or check_path(mount16, "system/bin/bootanimation")
+              f.write(f"- Android 11 `bootanimation` binary: `{anim_bin_11}`\n")
+              f.write(f"- Android 16 `bootanimation` binary: `{anim_bin_16}`\n\n")
+
+              # 5. Runtime & Home Screen
+              f.write("## 5. Runtime & Home Screen Initialization (Zygote & SystemServer)\n")
+              fw_11 = check_path(mount11, "framework/services.jar") or check_path(mount11, "system/framework/services.jar")
+              fw_16 = check_path(mount16, "framework/services.jar") or check_path(mount16, "system/framework/services.jar")
+              f.write(f"- Android 11 Core Framework (`services.jar`): `{fw_11}`\n")
+              f.write(f"- Android 16 Core Framework (`services.jar`): `{fw_16}`\n\n")
+
+              f.write("## Conclusion & Troubleshooting Checklist for Android 16 GSI Boot Failure\n")
+              f.write("1. **VINTF & HAL Mismatch**: If Android 16 expects newer AIDL HAL versions that the Android 11 vendor partition fails to serve, `servicemanager` or `hwservicemanager` will abort early.\n")
+              f.write("2. **HIDL Deprecation**: Android 16 has largely purged legacy HIDL interfaces. If core components look for HIDL services that have been completely transitioned to AIDL, boot hangs before reaching boot animation.\n")
+              f.write("3. **Kernel & Sepolicy Restrictions**: Ensure the Android 11 vendor sepolicy allows the new Android 16 service contexts.\n")
+
+          EOF
+          cat reports/boot_execution_comparison.md
+
+      - name: Safely Unmount Images
+        if: always()
+        run: |
+          sudo umount workspace/mount11 || fusermount -u workspace/mount11 || true
+          sudo umount workspace/mount16 || fusermount -u workspace/mount16 || true
+
+      - name: Upload Boot Chain & HAL Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: gsi-boot-and-hal-report
+          path: reports/boot_execution_comparison.md
