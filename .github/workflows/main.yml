@@ -67,13 +67,17 @@ jobs:
             cp workspace/android16/gsi.img workspace/android16/system_raw.img
           fi
 
-      - name: Mount Extracted GSI System Images
+      - name: Mount Extracted ext4 GSI System Images
         run: |
-          sudo guestmount -a workspace/android11/system_raw.img -m /dev/sda workspace/mount11 --ro || \
-          sudo mount -o loop,ro workspace/android11/system_raw.img workspace/mount11 || true
+          echo "Mounting Android 11 ext4 system image..."
+          sudo mount -t ext4 -o loop,ro workspace/android11/system_raw.img workspace/mount11
 
-          sudo guestmount -a workspace/android16/system_raw.img -m /dev/sda workspace/mount16 --ro || \
-          sudo mount -o loop,ro workspace/android16/system_raw.img workspace/mount16 || true
+          echo "Mounting Android 16 ext4 system image..."
+          sudo mount -t ext4 -o loop,ro workspace/android16/system_raw.img workspace/mount16
+
+          echo "Verifying mount contents..."
+          ls -la workspace/mount11
+          ls -la workspace/mount16
 
       - name: Analyze Boot Chain & HALs (Power-On to Home Screen)
         run: |
@@ -198,8 +202,8 @@ jobs:
       - name: Safely Unmount Images
         if: always()
         run: |
-          sudo umount workspace/mount11 || fusermount -u workspace/mount11 || true
-          sudo umount workspace/mount16 || fusermount -u workspace/mount16 || true
+          sudo umount workspace/mount11 || true
+          sudo umount workspace/mount16 || true
 
       - name: Upload Boot Chain & HAL Report
         uses: actions/upload-artifact@v4
