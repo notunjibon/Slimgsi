@@ -203,7 +203,7 @@ jobs:
           sudo umount /mnt/a16 2>/dev/null || true
           
       - name: Upload diagnostic results
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: diagnostic-results
           path: diagnostic_summary.txt
