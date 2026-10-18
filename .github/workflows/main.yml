@@ -1,0 +1,208 @@
+name: Diagnose Android 16 GSI Boot Issues
+
+on:
+  workflow_dispatch:
+  inputs:
+    a11_url:
+      description: 'Android 11 GSI .xz URL'
+      required: true
+    a16_url:
+      description: 'Android 16 GSI .xz URL'
+      required: true
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:22.04
+    
+    steps:
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y android-tools-fsutils e2fsprogs wget binutils strings xz-utils sudo
+          
+      - name: Download and extract GSI images
+        run: |
+          wget "${{ https://release-assets.githubusercontent.com/github-production-release-asset/1414404819/5d15ea29-c236-4e13-9b03-8b4adb788e59?sp=r&sv=2018-11-09&sr=b&spr=https&se=2026-10-18T05%3A40%3A49Z&rscd=attachment%3B+filename%3Dcrdrom-v316-220330-arm64-bgZ-slim.img.xz&rsct=application%2Foctet-stream&skoid=96c2d410-5711-43a1-aedd-ab1947aa7ab0&sktid=398a6654-997b-47e9-b12b-9515b896b4de&skt=2026-10-18T04%3A40%3A22Z&ske=2026-10-18T05%3A40%3A49Z&sks=b&skv=2018-11-09&sig=mEayVGr11WxAKvxKpHnl0p6DIKHpT3kWc56h%2Fde5nXk%3D&jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmVsZWFzZS1hc3NldHMuZ2l0aHVidXNlcmNvbnRlbnQuY29tIiwia2V5Ijoia2V5MSIsImV4cCI6MTc5MjMwMzQxOCwibmJmIjoxNzkyMjk5ODE4LCJwYXRoIjoicmVsZWFzZWFzc2V0cHJvZHVjdGlvbi5ibG9iLmNvcmUud2luZG93cy5uZXQifQ.bm9YmZmSK9q_1tSQLoK4L12NpD-KNuAl6oLRokL39Ik&response-content-disposition=attachment%3B%20filename%3Dcrdrom-v316-220330-arm64-bgZ-slim.img.xz&response-content-type=application%2Foctet-stream }}" -O a11.img.xz
+          wget "${{ https://release-assets.githubusercontent.com/github-production-release-asset/1414404819/3125a549-965b-428c-a978-7e9c91a3d101?sp=r&sv=2018-11-09&sr=b&spr=https&se=2026-10-18T06%3A03%3A13Z&rscd=attachment%3B+filename%3Ddrive.usercontent.google.com-slim.img.xz&rsct=application%2Foctet-stream&skoid=96c2d410-5711-43a1-aedd-ab1947aa7ab0&sktid=398a6654-997b-47e9-b12b-9515b896b4de&skt=2026-10-18T05%3A02%3A22Z&ske=2026-10-18T06%3A03%3A13Z&sks=b&skv=2018-11-09&sig=7OAq9TssPt85jVNT5Zx74o6SAAAOEAP5w8G5Kd12zm0%3D&jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmVsZWFzZS1hc3NldHMuZ2l0aHVidXNlcmNvbnRlbnQuY29tIiwia2V5Ijoia2V5MSIsImV4cCI6MTc5MjMwMzQzNywibmJmIjoxNzkyMjk5ODM3LCJwYXRoIjoicmVsZWFzZWFzc2V0cHJvZHVjdGlvbi5ibG9iLmNvcmUud2luZG93cy5uZXQifQ.V10_LKx9-c4aR2kIj4CLY6V1_GEVVK3hOLvXEcHfU30&response-content-disposition=attachment%3B%20filename%3Ddrive.usercontent.google.com-slim.img.xz&response-content-type=application%2Foctet-stream }}" -O a16.img.xz
+          
+          echo "Extracting .xz files..."
+          xz -d a11.img.xz
+          xz -d a16.img.xz
+          
+          echo "Converting sparse images to raw..."
+          simg2img a11.img a11.raw.img
+          simg2img a16.img a16.raw.img
+          
+          mkdir -p /mnt/a11 /mnt/a16
+          
+      - name: Mount images
+        run: |
+          sudo mount -o loop,ro a11.raw.img /mnt/a11
+          sudo mount -o loop,ro a16.raw.img /mnt/a16
+          
+          echo "=== Mount verification ==="
+          df /mnt/a11 /mnt/a16
+          
+      - name: Compare HAL files
+        run: |
+          echo "=== Android 11 HAL files ==="
+          find /mnt/a11/vendor/lib* -name "*hwcomposer*" -o -name "*gralloc*" 2>/dev/null | head -10
+          
+          echo "=== Android 16 HAL files ==="
+          find /mnt/a16/vendor/lib* -name "*hwcomposer*" -o -name "*gralloc*" 2>/dev/null | head -10
+          
+          echo "=== Detailed comparison ==="
+          echo "A11 hwcomposer:"
+          ls -lh /mnt/a11/vendor/lib*/hw/hwcomposer* 2>/dev/null || echo "Not found"
+          
+          echo "A16 hwcomposer:"
+          ls -lh /mnt/a16/vendor/lib*/hw/hwcomposer* 2>/dev/null || echo "Not found"
+          
+      - name: Check library dependencies
+        run: |
+          echo "=== A11 libc ==="
+          file /mnt/a11/system/lib*/libc.so
+          
+          echo "=== A16 libc ==="
+          file /mnt/a16/system/lib*/libc.so
+          
+          echo "=== A11 EGL/GLES ==="
+          ls -lh /mnt/a11/system/lib*/libEGL* /mnt/a11/system/lib*/libGLES* 2>/dev/null
+          
+          echo "=== A16 EGL/GLES ==="
+          ls -lh /mnt/a16/system/lib*/libEGL* /mnt/a16/system/lib*/libGLES* 2>/dev/null
+          
+      - name: Compare system libraries
+        run: |
+          echo "=== Library version strings comparison ==="
+          
+          echo "A11 libc symbols:"
+          nm -D /mnt/a11/system/lib64/libc.so 2>/dev/null | grep -i "GLIBC\|version" | head -5 || echo "N/A"
+          
+          echo "A16 libc symbols:"
+          nm -D /mnt/a16/system/lib64/libc.so 2>/dev/null | grep -i "GLIBC\|version" | head -5 || echo "N/A"
+          
+      - name: Check init scripts
+        run: |
+          echo "=== Init script comparison ==="
+          
+          echo "A11 init files:"
+          find /mnt/a11/system/etc/init* -type f 2>/dev/null | grep -E "bootanim|graphics|hwc|display" | head -5
+          
+          echo "A16 init files:"
+          find /mnt/a16/system/etc/init* -type f 2>/dev/null | grep -E "bootanim|graphics|hwc|display" | head -5
+          
+          echo "=== A11 bootanim.rc ==="
+          cat /mnt/a11/system/etc/init/bootanim.rc 2>/dev/null || cat /mnt/a11/system/etc/init.d/bootanim.rc 2>/dev/null || echo "Not found"
+          
+          echo "=== A16 bootanim.rc ==="
+          cat /mnt/a16/system/etc/init/bootanim.rc 2>/dev/null || cat /mnt/a16/system/etc/init.d/bootanim.rc 2>/dev/null || echo "Not found"
+          
+      - name: Compare build.prop
+        run: |
+          echo "=== Graphics-related properties (A11) ==="
+          grep -i "graphics\|hwc\|display\|ro.surface\|ro.hardware" /mnt/a11/system/build.prop 2>/dev/null | head -10
+          
+          echo "=== Graphics-related properties (A16) ==="
+          grep -i "graphics\|hwc\|display\|ro.surface\|ro.hardware" /mnt/a16/system/build.prop 2>/dev/null | head -10
+          
+      - name: Check SELinux
+        run: |
+          echo "=== SELinux policy files ==="
+          echo "A11:"
+          ls -la /mnt/a11/system/etc/selinux/ 2>/dev/null
+          
+          echo "A16:"
+          ls -la /mnt/a16/system/etc/selinux/ 2>/dev/null
+          
+          echo "=== SELinux policy sizes ==="
+          wc -c /mnt/a11/system/etc/selinux/sepolicy 2>/dev/null
+          wc -c /mnt/a16/system/etc/selinux/sepolicy 2>/dev/null
+          
+      - name: Check vendor partition
+        run: |
+          echo "=== Vendor partition overview ==="
+          echo "A11 vendor contents:"
+          du -sh /mnt/a11/vendor/* 2>/dev/null | sort -h | tail -10
+          
+          echo "A16 vendor contents:"
+          du -sh /mnt/a16/vendor/* 2>/dev/null | sort -h | tail -10
+          
+          echo "=== Vendor lib comparison ==="
+          echo "A11 vendor/lib* dirs:"
+          ls -d /mnt/a11/vendor/lib* 2>/dev/null
+          
+          echo "A16 vendor/lib* dirs:"
+          ls -d /mnt/a16/vendor/lib* 2>/dev/null
+          
+      - name: Check framework files
+        run: |
+          echo "=== Framework comparison ==="
+          echo "A11 libsurfaceflinger.so:"
+          ls -lh /mnt/a11/system/lib*/libsurfaceflinger.so 2>/dev/null || echo "Not found"
+          
+          echo "A16 libsurfaceflinger.so:"
+          ls -lh /mnt/a16/system/lib*/libsurfaceflinger.so 2>/dev/null || echo "Not found"
+          
+          echo "=== Boot animation binary ==="
+          echo "A11 bootanimation:"
+          ls -lh /mnt/a11/system/bin/bootanimation 2>/dev/null || echo "Not found"
+          
+          echo "A16 bootanimation:"
+          ls -lh /mnt/a16/system/bin/bootanimation 2>/dev/null || echo "Not found"
+          
+      - name: Generate diagnostic summary
+        run: |
+          cat > diagnostic_summary.txt << 'EOF'
+          Android GSI Boot Issue Diagnostic Report
+          ==========================================
+          
+          INVESTIGATION CHECKLIST:
+          
+          1. HAL Compatibility
+             - Check if hwcomposer/gralloc exist in both versions
+             - Check if they're different sizes (size mismatch = likely incompatible)
+             
+          2. System Library Versions
+             - libc.so size difference indicates ABI incompatibility
+             - EGL/GLES library presence and sizes
+             
+          3. Init Scripts
+             - Look for syntax differences in bootanim.rc
+             - Check if service definitions match
+             
+          4. SELinux
+             - Check if sepolicy files exist and sizes match
+             - Different sizes = likely policy conflicts
+             
+          5. Vendor Partition
+             - Check if vendor/lib64 vs vendor/lib structure differs
+             - Missing vendor/lib directories can break HAL loading
+             
+          6. Build Properties
+             - Look for ro.hardware, ro.board.platform differences
+             - These affect HAL selection
+          
+          LIKELY CULPRITS (in order):
+          - Missing vendor/lib64 directory (A16 may require 64-bit libs)
+          - libc.so version mismatch (check file sizes)
+          - SELinux policy incompatibility (size difference = high risk)
+          - Missing or incompatible bootanimation binary
+          - hwcomposer/gralloc HAL incompatibility
+          EOF
+          cat diagnostic_summary.txt
+          
+      - name: Unmount images
+        if: always()
+        run: |
+          sudo umount /mnt/a11 2>/dev/null || true
+          sudo umount /mnt/a16 2>/dev/null || true
+          
+      - name: Upload diagnostic results
+        uses: actions/upload-artifact@v3
+        with:
+          name: diagnostic-results
+          path: |
+            diagnostic_summary.txt
