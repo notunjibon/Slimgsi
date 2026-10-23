@@ -38,7 +38,7 @@ on:
         description: "Comma-separated paths to delete, relative to the system tree. Globs allowed, case-insensitive."
         required: true
         type: string
-        default: "product/app/WebViewGoogle64,product/app/TrichromeLibrary64,product/app/talkback,product/app/Camelot,product/app/SpeechServicesByGoogle,product/app/CalculatorGoogle,product/app/messaging,product/app/Glimpse,product/app/Jelly,product/priv-app/Contacts,product/priv-app/GoogleRestore,product/usr/srec/en-US"
+        default: "product/app/webview,product/app/CalendarGooglePrebuilt,product/app/GoogleContacts,product/app/GoogleTTS,product/app/ExactCalculator,product/app/PrebuiltBugle,product/app/Photos,product/app/Maps,product/priv-app/Velvet,product/priv-app/FilesPrebuilt"
       max_mib:
         description: "Largest allowed filesystem size in MiB (2.56 GiB = 2621; default leaves a little slack)"
         required: true
