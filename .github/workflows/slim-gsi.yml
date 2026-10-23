@@ -43,7 +43,7 @@ on:
         description: "Largest allowed filesystem size in MiB (2.56 GiB = 2621; default leaves a little slack)"
         required: true
         type: string
-        default: "2600"
+        default: "2606"
       dry_run:
         description: "true = only list matches and sizes, then stop"
         required: true
