@@ -1,4 +1,4 @@
-name: GSI camera fix (Android 12 GSI on Android 9 MTK vendor)[span_0](start_span)[span_0](end_span)
+name: GSI bvcamera fix (Android 12 GSI on Android 9 MTK vendor)[span_0](start_span)[span_0](end_span)
 
 # Run from the Actions tab -> "Run workflow". Paste the links in the form.
 # Output: a compressed sparse system image on a GitHub Release (download link in the run summary),
