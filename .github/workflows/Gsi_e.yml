@@ -1,4 +1,4 @@
-name: GSI camera fix (Android 12 GSI on Android 9 MTK vendor)[span_1](start_span)[span_1](end_span)
+name: GSI bvcamera fix (Android 12 GSI on Android 9 MTK vendor)
 
 # Run from the Actions tab -> "Run workflow". Paste the links in the form.
 # Output: a compressed sparse system image on a GitHub Release (download link in the run summary),
@@ -70,35 +70,62 @@ jobs:
       MAX_SIZE_MIB: ${{ inputs.max_size_mib }}
       TAG_PREFIX: ${{ inputs.release_tag }}
       GH_TOKEN: ${{ github.token }}
+
     steps:
       - name: Free disk space and install tools
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL || true
-          sudo apt-get update -q
-          sudo apt-get install -y -q android-sdk-libsparse-utils e2fsprogs attr xxd p7zip-full xz-utils unzip file binutils
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            android-sdk-libsparse-utils \
+            e2fsprogs \
+            attr \
+            xxd \
+            p7zip-full \
+            xz-utils \
+            unzip \
+            file \
+            binutils
           df -h /
 
       - name: Build
         shell: bash
         run: |
-          set -euo pipefail
-          W="$GITHUB_WORKSPACE/work"; mkdir -p "$W"; cd "$W"
-          MNT="$W/mnt"; MNT11="$W/mnt11"; mkdir -p "$MNT" "$MNT11"
-          cleanup() { sudo umount "$MNT" 2>/dev/null || true; sudo umount "$MNT11" 2>/dev/null || true; }
+          set -Eeuo pipefail
+
+          W="$GITHUB_WORKSPACE/work"
+          mkdir -p "$W"
+          cd "$W"
+
+          MNT="$W/mnt"
+          MNT11="$W/mnt11"
+          mkdir -p "$MNT" "$MNT11"
+
+          cleanup() {
+            sudo umount "$MNT" 2>/dev/null || true
+            sudo umount "$MNT11" 2>/dev/null || true
+          }
           trap cleanup EXIT
 
-          fetch() { curl -fL --retry 4 --retry-delay 5 -A "Mozilla/5.0" -o "$2" "$1"; }
+          fetch() {
+            curl -fL --retry 4 --retry-delay 5 -A "Mozilla/5.0" -o "$2" "$1"
+          }
 
           pick_img() {
             find "$1" -type f \( -name '*.img' -o -name '*.img.*' -o -name 'system*' \) -printf '%s %p\n' \
               | sort -nr | head -1 | cut -d' ' -f2-
           }
 
-          # download -> raw (non-sparse) image at $2
           get_raw_image() {
-            local url="$1" out="$2" tmp="$W/dl.$$"
-            mkdir -p "$tmp"; fetch "$url" "$tmp/in.bin"
-            local cur="$tmp/in.bin" i t
+            local url="$1"
+            local out="$2"
+            local tmp="$W/dl.$$"
+            mkdir -p "$tmp"
+            fetch "$url" "$tmp/in.bin"
+
+            local cur="$tmp/in.bin"
+            local i t
+
             for i in 1 2 3 4; do
               t=$(file -b "$cur")
               case "$t" in
@@ -109,11 +136,14 @@ jobs:
                 *) break ;;
               esac
             done
+
             if [ "$(head -c4 "$cur" | xxd -p)" = "3aff26ed" ]; then
-              simg2img "$cur" "$out"; rm -f "$cur"
+              simg2img "$cur" "$out"
+              rm -f "$cur"
             else
               mv "$cur" "$out"
             fi
+
             rm -rf "$tmp"
           }
 
@@ -126,135 +156,189 @@ jobs:
             echo unknown
           }
 
-          fsck_ok() { local rc=0; e2fsck -fy "$1" >/dev/null 2>&1 || rc=$?; [ "$rc" -lt 4 ]; }
-
-          # the system root inside the mounted image (system-as-root layouts keep it in /system)
-          sysroot() {
-            if [ -f "$1/system/build.prop" ] || [ -d "$1/system/system_ext" ]; then echo "$1/system"; else echo "$1"; fi
+          fsck_ok() {
+            local rc=0
+            e2fsck -fy "$1" >/dev/null 2>&1 || rc=$?
+            [ "$rc" -lt 4 ]
           }
 
-          collect_info() { # root outfile
-            local r="$1" o="$2"
+          sysroot() {
+            if [ -f "$1/system/build.prop" ] || [ -d "$1/system/system_ext" ]; then
+              echo "$1/system"
+            else
+              echo "$1"
+            fi
+          }
+
+          collect_info() {
+            local r="$1"
+            local o="$2"
             set +e
             {
-              echo "### build.prop"; grep -E '^ro\.(build\.(version\.(release|sdk)|id|display\.id|type)|product\.(model|name)|system\.build\.fingerprint)|^ro\.vndk|^ro\.treble' "$r/build.prop" 2>/dev/null || true
-              echo; echo "### selinux dirs"
+              echo "### build.prop"
+              grep -E '^ro\.(build\.(version\.(release|sdk)|id|display\.id|type)|product\.(model|name)|system\.build\.fingerprint)|^ro\.vndk|^ro\.treble' "$r/build.prop" 2>/dev/null || true
+              echo
+              echo "### selinux dirs"
               ls -1 "$r/etc/selinux" 2>/dev/null | head -50
-              echo "--- mapping (plat)";   ls -1 "$r/etc/selinux/mapping" 2>/dev/null
-              echo "--- system_ext selinux"; ls -1 "$r/system_ext/etc/selinux" "$r/system_ext/etc/selinux/mapping" 2>/dev/null
-              echo; echo "### vndk apex / dirs"
+              echo "--- mapping (plat)"
+              ls -1 "$r/etc/selinux/mapping" 2>/dev/null
+              echo "--- system_ext selinux"
+              ls -1 "$r/system_ext/etc/selinux" "$r/system_ext/etc/selinux/mapping" 2>/dev/null
+              echo
+              echo "### vndk apex / dirs"
               ls -1 "$r/apex" 2>/dev/null | grep -i vndk || true
               ls -1d "$r"/lib/vndk-* "$r"/lib64/vndk-* 2>/dev/null || true
-              echo; echo "### camera init rc files"
+              echo
+              echo "### camera init rc files"
               grep -rli camera "$r/etc/init" "$r/system_ext/etc/init" "$r/product/etc/init" 2>/dev/null | sed "s#^$r/##" || true
-              echo; echo "### cameraserver.rc"
+              echo
+              echo "### cameraserver.rc"
               cat "$r/etc/init/cameraserver.rc" 2>/dev/null || true
-              echo; echo "### camera lines in other rc files"
+              echo
+              echo "### camera lines in other rc files"
               grep -rHi camera "$r/etc/init" "$r/system_ext/etc/init" "$r/product/etc/init" 2>/dev/null | grep -v '/cameraserver.rc:' | sed "s#^$r/##" || true
-              echo; echo "### camera libs (size)"
+              echo
+              echo "### camera libs (size)"
               for f in "$r"/lib/libcameraservice.so "$r"/lib64/libcameraservice.so "$r"/lib64/libcamera_client.so \
                        "$r"/lib64/libcamera_metadata.so "$r"/lib64/android.hardware.camera.provider@2.*.so \
                        "$r"/lib/android.hardware.camera.provider@2.*.so "$r"/bin/cameraserver; do
                 [ -e "$f" ] && stat -c '%s %n' "$f" | sed "s#$r/##"
               done
-              echo; echo "### framework vintf (camera)"
+              echo
+              echo "### framework vintf (camera)"
               grep -rHi -B1 -A6 camera "$r/etc/vintf" "$r/system_ext/etc/vintf" 2>/dev/null | sed "s#$r/##" | head -80 || true
-              echo; echo "### scripts that touch patched vendor libs (VDSceneDetector / bind mounts)"
-              grep -rHn -B3 -A3 'VDSceneDetector' "$r/bin" "$r/etc/init" "$r/system_ext/bin" "$r/system_ext/etc/init" "$r/product/etc/init" 2>/dev/null | grep -v '^Binary' | sed "s#^$r/##" | head -80
-              echo; echo "### rw-system.sh mount/bind lines"
+              echo
+              echo "### scripts that touch patched vendor libs (VDSceneDetector / bind mounts)"
+              grep -rHn -B3 -A3 'VDSceneDetector' "$r/bin" "$r/etc/init" "$r/system_ext/bin" "$r/system_ext/etc/init" "$r/product/etc/init" 2>/dev/null | grep -v '^Binary' | sed "s#^$r/##" | head -80 || true
+              echo
+              echo "### rw-system.sh mount/bind lines"
               grep -n 'mount\|bind' "$r/bin/rw-system.sh" 2>/dev/null | head -80
-              echo; echo "### phh / treble camera properties in build.prop & rc"
+              echo
+              echo "### phh / treble camera properties in build.prop & rc"
               grep -rHi 'phh.*camera\|camera.*phh' "$r/build.prop" "$r/etc/init" "$r/system_ext/etc/init" "$r/product/etc/init" 2>/dev/null | sed "s#^$r/##" || true
             } > "$o" 2>&1
             set -e
           }
 
-          clone_label() { # ref new
+          clone_label() {
             local l
             l=$(sudo getfattr -n security.selinux --only-values "$1" 2>/dev/null | tr -d '\0' || true)
-            if [ -n "$l" ]; then sudo setfattr -n security.selinux -v "$l" "$2"; else echo "warning: could not copy SELinux label to $2"; fi
+            if [ -n "$l" ]; then
+              sudo setfattr -n security.selinux -v "$l" "$2"
+            else
+              echo "warning: could not copy SELinux label to $2"
+            fi
           }
 
-          # Android 12 cameraserver rejects HAL1 devices ("Unsupported HIDL device HAL major version 1").
-          # Android 11's accepts them. Ship A11's cameraserver and every lib in its dependency closure
-          # into /system/lib64/hw/cam11 (a path the system linker namespace permits) and point cameraserver
-          # at it with LD_LIBRARY_PATH (set in its init rc), so only cameraserver sees them and the rest
-          # of the system keeps its A12 libs.
-          transplant_camera() { # a11root a12root
-            local s="$1" d="$2" P="$2/lib64/hw/cam11"
+          transplant_camera() {
+            local s="$1"
+            local d="$2"
+            local P="$2/lib64/hw/cam11"
+
             if [ ! -f "$s/lib64/libcameraservice.so" ] || [ ! -f "$s/bin/cameraserver" ]; then
-              echo "::error::A11 image has no lib64/libcameraservice.so or bin/cameraserver (is it an arm64 GSI?)"; return 1
-            fi
-            if [ "$(readelf -h "$s/bin/cameraserver" | awk '/Class:/{print $2}')" != "ELF64" ]; then
-              echo "::error::A11 cameraserver is not a 64-bit binary"; return 1
+              echo "::error::A11 image has no lib64/libcameraservice.so or bin/cameraserver (is it an arm64 GSI?)"
+              return 1
             fi
 
-            # === STEP 1: Collect A11 camera library closure ===
-            declare -A seen=(); local queue=("libcameraservice.so") head=0 lib n
+            if [ "$(readelf -h "$s/bin/cameraserver" | awk '/Class:/{print $2}')" != "ELF64" ]; then
+              echo "::error::A11 cameraserver is not a 64-bit binary"
+              return 1
+            fi
+
+            declare -A seen=()
+            local queue=("libcameraservice.so")
+            local head=0
+            local lib
+            local n
+
             seen["libcameraservice.so"]=1
-            # closure of the executable first
+
             for n in $(readelf -d "$s/bin/cameraserver" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'); do
-              if [ -f "$s/lib64/$n" ] && [ -z "${seen[$n]:-}" ]; then seen[$n]=1; queue+=("$n"); fi
+              if [ -f "$s/lib64/$n" ] && [ -z "${seen[$n]:-}" ]; then
+                seen["$n"]=1
+                queue+=("$n")
+              fi
             done
+
             while [ "$head" -lt "${#queue[@]}" ]; do
-              lib="${queue[$head]}"; head=$((head+1))
+              lib="${queue[$head]}"
+              head=$((head+1))
+
               for n in $(readelf -d "$s/lib64/$lib" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'); do
-                if [ -f "$s/lib64/$n" ] && [ -z "${seen[$n]:-}" ]; then seen[$n]=1; queue+=("$n"); fi
+                if [ -f "$s/lib64/$n" ] && [ -z "${seen[$n]:-}" ]; then
+                  seen["$n"]=1
+                  queue+=("$n")
+                fi
               done
             done
+
             echo "A11 camera closure: ${#queue[@]} libraries"
 
-            # === STEP 2: Create destination dirs and copy libraries ===
             sudo mkdir -p "$P"
             clone_label "$d/lib64/hw" "$P"
+
             local refl="$d/lib64/libcameraservice.so"
             [ -f "$refl" ] || refl=$(ls "$d"/lib64/*.so 2>/dev/null | head -1)
+
             for lib in "${queue[@]}"; do
               sudo cp --no-preserve=all "$s/lib64/$lib" "$P/$lib"
-              sudo chmod 644 "$P/$lib"; sudo chown 0:0 "$P/$lib"
+              sudo chmod 644 "$P/$lib"
+              sudo chown 0:0 "$P/$lib"
               clone_label "$refl" "$P/$lib"
             done
 
-            # === STEP 3: Backup A12 cameraserver and install A11 version ===
             [ -f "$d/bin/cameraserver.a12" ] || sudo cp -a "$d/bin/cameraserver" "$d/bin/cameraserver.a12"
             local refb="$d/bin/cameraserver.a12"
+
             sudo cp --no-preserve=all "$s/bin/cameraserver" "$d/bin/cameraserver"
-            sudo chmod 755 "$d/bin/cameraserver"; sudo chown 0:0 "$d/bin/cameraserver"
+            sudo chmod 755 "$d/bin/cameraserver"
+            sudo chown 0:0 "$d/bin/cameraserver"
             clone_label "$refb" "$d/bin/cameraserver"
 
-            # === STEP 4: Create wrapper script for A12 cameraserver (fallback) ===[span_2](start_span)[span_2](end_span)
-            cat > "$W/cameraserver_wrapper" << 'WRAPPER[span_3](start_span)'[span_3](end_span)
+            cat > "$W/cameraserver_wrapper" <<'WRAPPER'
 #!/system/bin/sh
 export LD_LIBRARY_PATH="/system/lib64/hw/cam11:/system/lib/hw/cam11:${LD_LIBRARY_PATH}"
 exec /system/bin/cameraserver.a12 "$@"
 WRAPPER
+
             sudo cp "$W/cameraserver_wrapper" "$d/bin/cameraserver_wrapper"
             sudo chmod 755 "$d/bin/cameraserver_wrapper"
             clone_label "$refb" "$d/bin/cameraserver_wrapper"
 
-            # === STEP 5: Modify cameraserver.rc to set LD_LIBRARY_PATH ===[span_4](start_span)[span_4](end_span)
             local rc="$d/etc/init/cameraserver.rc"
-            if [ ! -f "$rc" ]; then echo "::error::$rc not found"; return 1; fi
+            if [ ! -f "$rc" ]; then
+              echo "::error::$rc not found"
+              return 1
+            fi
+
             if ! grep -q 'LD_LIBRARY_PATH.*cam11' "$rc"; then
               awk '{print} /^service cameraserver /&&!d{print "    setenv LD_LIBRARY_PATH /system/lib64/hw/cam11:/system/lib/hw/cam11"; d=1}' "$rc" > "$W/cameraserver.rc.new"
               grep -q 'LD_LIBRARY_PATH.*cam11' "$W/cameraserver.rc.new" || { echo "::error::could not edit cameraserver.rc"; return 1; }
               sudo tee "$rc" < "$W/cameraserver.rc.new" >/dev/null
             fi
 
-            # === STEP 6: Sanity check - verify all NEEDED libs resolve ===[span_5](start_span)[span_5](end_span)
-            local missing=0 f
+            local missing=0
+            local f
             for f in "$P"/*.so "$d/bin/cameraserver"; do
               for n in $(readelf -d "$f" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'); do
                 [ -f "$P/$n" ] || [ -f "$d/lib64/$n" ] || [ -f "$d/system_ext/lib64/$n" ] || \
-                  case "$n" in libc.so|libm.so|libdl.so|libc++.so|ld-android.so) ;; *) echo "::warning::unresolved: $(basename "$f") needs $n"; missing=$((missing+1));; esac
+                  case "$n" in
+                    libc.so|libm.so|libdl.so|libc++.so|ld-android.so
+                    ) ;;
+                    *)
+                      echo "::warning::unresolved: $(basename "$f") needs $n"
+                      missing=$((missing+1))
+                      ;;
+                  esac
               done
             done
+
             echo "transplant done, unresolved dependencies: $missing"
             TRANSPLANT_NOTE="A11 camera stack (${#queue[@]} libs, unresolved: $missing)"
           }
+
           TRANSPLANT_NOTE=""
 
-          # ---------------------------------------------------------------- A12 image
           echo "::group::Download and unpack A12 GSI"
           get_raw_image "$A12_URL" "$W/a12.img"
           ls -l "$W/a12.img"
@@ -270,17 +354,30 @@ WRAPPER
           fsck_ok "$W/a12.img" || { echo "::error::e2fsck found unrecoverable errors in the source image"; exit 1; }
           FEATS=$(dumpe2fs -h "$W/a12.img" 2>/dev/null | grep -i '^Filesystem features' || true)
           echo "$FEATS"
-          # grow first (room for the new files + un-sharing), shrink again at the end
+
           truncate -s +1536M "$W/a12.img"
           resize2fs "$W/a12.img" >/dev/null
-          if echo "$FEATS" | grep -q 'read-only'; then tune2fs -O ^read-only "$W/a12.img" || true; fi
+          if echo "$FEATS" | grep -q 'read-only'; then
+            tune2fs -O ^read-only "$W/a12.img" || true
+          fi
           if echo "$FEATS" | grep -q 'shared_blocks'; then
             e2fsck -fy -E unshare_blocks "$W/a12.img" >/dev/null 2>&1 || true
           fi
+
           fsck_ok "$W/a12.img" || true
-          sudo mount -o loop,rw "$W/a12.img" "$MNT" || { echo "::error::could not mount the image read-write"; dumpe2fs -h "$W/a12.img" | grep -i features; exit 1; }
-          R=$(sysroot "$MNT"); echo "System root: $R"
-          [ -f "$R/build.prop" ] || { echo "::error::build.prop not found, unexpected image layout"; ls "$MNT"; exit 1; }
+          sudo mount -o loop,rw "$W/a12.img" "$MNT" || {
+            echo "::error::could not mount the image read-write"
+            dumpe2fs -h "$W/a12.img" | grep -i features
+            exit 1
+          }
+
+          R=$(sysroot "$MNT")
+          echo "System root: $R"
+          [ -f "$R/build.prop" ] || {
+            echo "::error::build.prop not found, unexpected image layout"
+            ls "$MNT"
+            exit 1
+          }
 
           collect_info "$R" "$W/info_a12.txt"
 
@@ -288,7 +385,7 @@ WRAPPER
             echo "::error::a11_camera_transplant is ticked but the A11 link is empty. Paste the A11 GSI link, or untick the box."
             exit 1
           fi
-          # ---------------------------------------------------------------- A11 image
+
           if [ -n "${A11_URL}" ]; then
             echo "::group::Download and unpack A11 GSI (comparison only)"
             get_raw_image "$A11_URL" "$W/a11.img"
@@ -296,15 +393,29 @@ WRAPPER
             if [ "$T11" = "ext4" ]; then
               sudo mount -o loop,ro "$W/a11.img" "$MNT11" 2>/dev/null || sudo mount -o loop,ro,noload "$W/a11.img" "$MNT11" || true
               if mountpoint -q "$MNT11"; then
-                R11=$(sysroot "$MNT11"); collect_info "$R11" "$W/info_a11.txt"
-                if [ "$TRANSPLANT" = "true" ]; then transplant_camera "$R11" "$R" || exit 1; fi
+                R11=$(sysroot "$MNT11")
+                collect_info "$R11" "$W/info_a11.txt"
+
+                if [ "$TRANSPLANT" = "true" ]; then
+                  transplant_camera "$R11" "$R" || exit 1
+                fi
               else
-                echo "A11 image could not be mounted"; [ "$TRANSPLANT" = "true" ] && { echo "::error::cannot read the A11 image, transplant impossible"; exit 1; }
+                echo "A11 image could not be mounted"
+                if [ "$TRANSPLANT" = "true" ]; then
+                  echo "::error::cannot read the A11 image, transplant impossible"
+                  exit 1
+                fi
               fi
             else
-              echo "A11 image is $T11"; [ "$TRANSPLANT" = "true" ] && { echo "::error::A11 image is $T11, only ext4 is supported for the transplant"; exit 1; }
+              echo "A11 image is $T11"
+              if [ "$TRANSPLANT" = "true" ]; then
+                echo "::error::A11 image is $T11, only ext4 is supported for the transplant"
+                exit 1
+              fi
             fi
-            sudo umount "$MNT11" 2>/dev/null || true; rm -f "$W/a11.img"
+
+            sudo umount "$MNT11" 2>/dev/null || true
+            rm -f "$W/a11.img"
             echo "::endgroup::"
           fi
 
@@ -314,28 +425,33 @@ WRAPPER
             echo "Transplant verified in the image."
           fi
 
-          # ---------------------------------------------------------------- patches
           APPLIED=""
-          CILDIR="$R/system_ext/etc/selinux"; CIL="$CILDIR/system_ext_sepolicy.cil"
+          CILDIR="$R/system_ext/etc/selinux"
+          CIL="$CILDIR/system_ext_sepolicy.cil"
+
           if [ "$SELINUX_PERMISSIVE" = "true" ] || [ "$SHELL_PERMISSIVE" = "true" ]; then
             if [ ! -f "$CIL" ]; then
               echo "::error::$CIL does not exist in this GSI. Creating it without the matching mapping files could break boot, so I stop here. Untick both SELinux options or use a different GSI."
               exit 1
             fi
+
             if ! grep -q 'CAMFIX_BEGIN' "$CIL"; then
               {
-                echo ""; echo "; CAMFIX_BEGIN (diagnostic permissive domains)"
+                echo
+                echo "; CAMFIX_BEGIN (diagnostic permissive domains)"
                 [ "$SELINUX_PERMISSIVE" = "true" ] && { echo "(typepermissive mtk_hal_camera)"; echo "(typepermissive cameraserver)"; }
-                [ "$SHELL_PERMISSIVE" = "true" ]   && echo "(typepermissive shell)"
+                [ "$SHELL_PERMISSIVE" = "true" ] && echo "(typepermissive shell)"
                 echo "; CAMFIX_END"
               } | sudo tee -a "$CIL" >/dev/null
             fi
+
             APPLIED="$APPLIED selinux-permissive($([ "$SELINUX_PERMISSIVE" = true ] && echo camera)$([ "$SHELL_PERMISSIVE" = true ] && echo ,shell))"
           fi
 
           if [ "$CAMERA_DEBUG_PROPS" = "true" ] || [ "$LATE_CAMERA_RESTART" = "true" ] || [ "$UNMOUNT_LIBS" = "true" ]; then
             RC="$R/system_ext/etc/init/camfix.rc"
             sudo mkdir -p "$R/system_ext/etc/init"
+
             {
               echo "# generated by gsi-camera-fix workflow"
               if [ "$CAMERA_DEBUG_PROPS" = "true" ]; then
@@ -343,78 +459,122 @@ WRAPPER
                 echo "    setprop vendor.debug.camera.log 1"
                 echo "    setprop persist.vendor.debug.camera.log 1"
               fi
-              # NOTE: on a 4.4 kernel Android 12 init cannot create /sys/fs/cgroup/uid_* groups, so
-              # "restart"/"stop" from init never really kills anything. We kill the processes ourselves.
+
               echo "service camfix_dump_early /system/bin/sh -c \"umask 022; sleep 3; dmesg > /data/local/tmp/dmesg_early.txt; logcat -b all -d > /data/local/tmp/logcat_early.txt\""
-              echo "    user root"; echo "    group root"; echo "    seclabel u:r:shell:s0"; echo "    oneshot"; echo "    disabled"
+              echo "    user root"
+              echo "    group root"
+              echo "    seclabel u:r:shell:s0"
+              echo "    oneshot"
+              echo "    disabled"
+
               echo "on property:init.svc.camerahalserver=running"
               echo "    start camfix_dump_early"
-              echo "service camfix_dump_late /system/bin/sh -c \"umask 022; sleep 60; dmesg > /data/local/tmp/dmesg_late.txt; logcat -b all -d > /data/local/tmp/logcat_late.txt; ps -AZ > /data/local/tmp/ps_late.txt; mount > /data/local/tmp/mount_late.txt\""
-              echo "    user root"; echo "    group root"; echo "    seclabel u:r:shell:s0"; echo "    oneshot"; echo "    disabled"
+
+              echo "service camfix_dump_late /system/bin/sh -c \"umask 022; sleep 60; dmesg > /data/local/tmp/dmesg_late.txt; logcat -b all -d > /data/local/tmp/logcat_late.txt; ps -AZ > /data/local/tmp/camfix_ps.txt\""
+              echo "    user root"
+              echo "    group root"
+              echo "    seclabel u:r:shell:s0"
+              echo "    oneshot"
+              echo "    disabled"
+
               echo "service camfix_kill /system/bin/sh -c \"sleep 15; /system/bin/toybox killall -9 camerahalserver cameraserver\""
-              echo "    user root"; echo "    group root"; echo "    seclabel u:r:shell:s0"; echo "    oneshot"; echo "    disabled"
+              echo "    user root"
+              echo "    group root"
+              echo "    seclabel u:r:shell:s0"
+              echo "    oneshot"
+              echo "    disabled"
+
               echo "on property:sys.boot_completed=1"
               echo "    start camfix_dump_late"
+
               if [ "$UNMOUNT_LIBS" = "true" ]; then
                 echo "    umount /vendor/lib/libVDSceneDetector.so"
                 echo "    umount /vendor/lib64/libVDSceneDetector.so"
               fi
+
               if [ "$LATE_CAMERA_RESTART" = "true" ] || [ "$UNMOUNT_LIBS" = "true" ]; then
                 echo "    start camfix_kill"
               fi
             } | sudo tee "$RC" >/dev/null
+
             sudo chmod 644 "$RC"
             REF=$(ls "$R"/system_ext/etc/init/*.rc 2>/dev/null | grep -v camfix.rc | head -1 || true)
             [ -z "$REF" ] && REF=$(ls "$R"/etc/init/*.rc | head -1)
             clone_label "$REF" "$RC"
             sudo chown 0:0 "$RC"
+
             APPLIED="$APPLIED init-rc(camfix.rc)"
           fi
+
           [ -n "$TRANSPLANT_NOTE" ] && APPLIED="$APPLIED $TRANSPLANT_NOTE"
           echo "Applied:${APPLIED:- none}"
 
-          # ---------------------------------------------------------------- finish image
-          sync; sudo umount "$MNT"
+          sync
+          sudo umount "$MNT"
+
           fsck_ok "$W/a12.img" || { echo "::error::filesystem check failed after patching"; exit 1; }
           resize2fs -M "$W/a12.img" >/dev/null
           fsck_ok "$W/a12.img" || true
+
           BC=$(dumpe2fs -h "$W/a12.img" 2>/dev/null | awk -F: '/^Block count/{gsub(/ /,"",$2);print $2}')
           BS=$(dumpe2fs -h "$W/a12.img" 2>/dev/null | awk -F: '/^Block size/{gsub(/ /,"",$2);print $2}')
-          SIZE=$((BC*BS)); truncate -s "$SIZE" "$W/a12.img"
+          SIZE=$((BC*BS))
+          truncate -s "$SIZE" "$W/a12.img"
+
           SIZE_MIB=$((SIZE/1048576))
           echo "Final raw size: ${SIZE_MIB} MiB (limit ${MAX_SIZE_MIB} MiB)"
+
           WARN=""
           [ "$SIZE_MIB" -gt "$MAX_SIZE_MIB" ] && WARN="WARNING: image is ${SIZE_MIB} MiB, larger than ${MAX_SIZE_MIB} MiB. It will not fit your system partition; slim it first with your Slimgsi workflow."
 
           img2simg "$W/a12.img" "$W/system.img"
           rm -f "$W/a12.img"
+
           xz -T0 -6 -k "$W/system.img"
-          OUT="system-a12-camfix.img.xz"; mv "$W/system.img.xz" "$W/$OUT"
+          OUT="system-a12-camfix.img.xz"
+          mv "$W/system.img.xz" "$W/$OUT"
+
           OUTSZ=$(stat -c %s "$W/$OUT")
           FILES=("$W/$OUT")
+
           if [ "$OUTSZ" -gt 2000000000 ]; then
-            split -b 1900M -d "$W/$OUT" "$W/$OUT.part"; rm "$W/$OUT"; FILES=("$W/$OUT.part"*)
+            split -b 1900M -d "$W/$OUT" "$W/$OUT.part"
+            rm -f "$W/$OUT"
+            FILES=("$W/$OUT.part"*)
           fi
 
           {
-            echo "GSI camera fix report"; echo "====================="
-            echo "Patches applied:${APPLIED:- none}"; echo "Final raw size: ${SIZE_MIB} MiB"; [ -n "$WARN" ] && echo "$WARN"; echo
+            echo "GSI camera fix report"
+            echo "====================="
+            echo "Patches applied:${APPLIED:- none}"
+            echo "Final raw size: ${SIZE_MIB} MiB"
+            [ -n "$WARN" ] && echo "$WARN"
+            echo
             if [ -f "$W/info_a11.txt" ]; then
-              echo "################ DIFF A11 (working) vs A12 ################"; diff -u "$W/info_a11.txt" "$W/info_a12.txt" || true; echo
-              echo "################ FULL A11 ################"; cat "$W/info_a11.txt"; echo
+              echo "################ DIFF A11 (working) vs A12 ################"
+              diff -u "$W/info_a11.txt" "$W/info_a12.txt" || true
+              echo
+              echo "################ FULL A11 ################"
+              cat "$W/info_a11.txt"
+              echo
             fi
-            echo "################ FULL A12 ################"; cat "$W/info_a12.txt"
+            echo "################ FULL A12 ################"
+            cat "$W/info_a12.txt"
           } > "$W/camera_report.txt"
 
           TAG="${TAG_PREFIX}-${GITHUB_RUN_ID}"
           gh release create "$TAG" "${FILES[@]}" "$W/camera_report.txt" --repo "$GITHUB_REPOSITORY" \
             --title "A12 GSI camfix $TAG" \
             --notes "Patches applied:${APPLIED:- none}. Output is a sparse system image compressed with xz: unpack, then fastboot flash system system.img."
+
           {
             echo "## Done"
             echo "Release: https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"
-            echo ""; echo "Patches applied:${APPLIED:- none}"; echo "Final raw size: ${SIZE_MIB} MiB"
+            echo
+            echo "Patches applied:${APPLIED:- none}"
+            echo "Final raw size: ${SIZE_MIB} MiB"
             [ -n "$WARN" ] && echo "" && echo "**$WARN**"
             [ "${#FILES[@]}" -gt 1 ] && echo "" && echo "Image was split: join with \`cat $OUT.part* > $OUT\` before unpacking."
-            echo ""; echo "After flashing, open the camera, then run: \`adb logcat -b all -d > cam.txt\` and \`adb shell dmesg > dmesg.txt\`, and send both."
+            echo
+            echo "After flashing, open the camera, then run: \`adb logcat -b all -d > cam.txt\` and \`adb shell dmesg > dmesg.txt\`, and send both."
           } >> "$GITHUB_STEP_SUMMARY"
