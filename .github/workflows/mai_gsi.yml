@@ -29,7 +29,11 @@ on:
         type: boolean
         default: true
       late_camera_restart:
-        description: "Restart camerahalserver + cameraserver once boot has completed (tests a start-order problem)"
+        description: "Kill camerahalserver + cameraserver ~15s after boot so init starts fresh copies (tests a start-order problem)"
+        type: boolean
+        default: true
+      unmount_patched_libs:
+        description: "After boot, un-mount the GSI's patched copy of /vendor/lib/libVDSceneDetector.so (camera lib) so the HAL uses the vendor original, then restart the camera HAL"
         type: boolean
         default: true
       max_size_mib:
@@ -57,6 +61,7 @@ jobs:
       SHELL_PERMISSIVE: ${{ inputs.shell_permissive }}
       CAMERA_DEBUG_PROPS: ${{ inputs.camera_debug_props }}
       LATE_CAMERA_RESTART: ${{ inputs.late_camera_restart }}
+      UNMOUNT_LIBS: ${{ inputs.unmount_patched_libs }}
       MAX_SIZE_MIB: ${{ inputs.max_size_mib }}
       TAG_PREFIX: ${{ inputs.release_tag }}
       GH_TOKEN: ${{ github.token }}
@@ -149,6 +154,10 @@ jobs:
               done
               echo; echo "### framework vintf (camera)"
               grep -rHi -B1 -A6 camera "$r/etc/vintf" "$r/system_ext/etc/vintf" 2>/dev/null | sed "s#$r/##" | head -80 || true
+              echo; echo "### scripts that touch patched vendor libs (VDSceneDetector / bind mounts)"
+              grep -rHn -B3 -A3 'VDSceneDetector' "$r/bin" "$r/etc/init" "$r/system_ext/bin" "$r/system_ext/etc/init" "$r/product/etc/init" 2>/dev/null | grep -v '^Binary' | sed "s#^$r/##" | head -80
+              echo; echo "### rw-system.sh mount/bind lines"
+              grep -n 'mount\|bind' "$r/bin/rw-system.sh" 2>/dev/null | head -80
               echo; echo "### phh / treble camera properties in build.prop & rc"
               grep -rHi 'phh.*camera\|camera.*phh' "$r/build.prop" "$r/etc/init" "$r/system_ext/etc/init" "$r/product/etc/init" 2>/dev/null | sed "s#^$r/##" || true
             } > "$o" 2>&1
@@ -225,7 +234,7 @@ jobs:
             APPLIED="$APPLIED selinux-permissive($([ "$SELINUX_PERMISSIVE" = true ] && echo camera)$([ "$SHELL_PERMISSIVE" = true ] && echo ,shell))"
           fi
 
-          if [ "$CAMERA_DEBUG_PROPS" = "true" ] || [ "$LATE_CAMERA_RESTART" = "true" ]; then
+          if [ "$CAMERA_DEBUG_PROPS" = "true" ] || [ "$LATE_CAMERA_RESTART" = "true" ] || [ "$UNMOUNT_LIBS" = "true" ]; then
             RC="$R/system_ext/etc/init/camfix.rc"
             sudo mkdir -p "$R/system_ext/etc/init"
             {
@@ -235,10 +244,24 @@ jobs:
                 echo "    setprop vendor.debug.camera.log 1"
                 echo "    setprop persist.vendor.debug.camera.log 1"
               fi
-              if [ "$LATE_CAMERA_RESTART" = "true" ]; then
-                echo "on property:sys.boot_completed=1"
-                echo "    restart camerahalserver"
-                echo "    restart cameraserver"
+              # NOTE: on a 4.4 kernel Android 12 init cannot create /sys/fs/cgroup/uid_* groups, so
+              # "restart"/"stop" from init never really kills anything. We kill the processes ourselves.
+              echo "service camfix_dump_early /system/bin/sh -c \"umask 022; sleep 3; dmesg > /data/local/tmp/dmesg_early.txt; logcat -b all -d > /data/local/tmp/logcat_early.txt\""
+              echo "    user root"; echo "    group root"; echo "    seclabel u:r:shell:s0"; echo "    oneshot"; echo "    disabled"
+              echo "on property:init.svc.camerahalserver=running"
+              echo "    start camfix_dump_early"
+              echo "service camfix_dump_late /system/bin/sh -c \"umask 022; sleep 60; dmesg > /data/local/tmp/dmesg_late.txt; logcat -b all -d > /data/local/tmp/logcat_late.txt; ps -AZ > /data/local/tmp/ps_late.txt; mount > /data/local/tmp/mount_late.txt\""
+              echo "    user root"; echo "    group root"; echo "    seclabel u:r:shell:s0"; echo "    oneshot"; echo "    disabled"
+              echo "service camfix_kill /system/bin/sh -c \"sleep 15; /system/bin/toybox killall -9 camerahalserver cameraserver\""
+              echo "    user root"; echo "    group root"; echo "    seclabel u:r:shell:s0"; echo "    oneshot"; echo "    disabled"
+              echo "on property:sys.boot_completed=1"
+              echo "    start camfix_dump_late"
+              if [ "$UNMOUNT_LIBS" = "true" ]; then
+                echo "    umount /vendor/lib/libVDSceneDetector.so"
+                echo "    umount /vendor/lib64/libVDSceneDetector.so"
+              fi
+              if [ "$LATE_CAMERA_RESTART" = "true" ] || [ "$UNMOUNT_LIBS" = "true" ]; then
+                echo "    start camfix_kill"
               fi
             } | sudo tee "$RC" >/dev/null
             sudo chmod 644 "$RC"
