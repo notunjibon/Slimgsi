@@ -36,6 +36,10 @@ on:
         description: "After boot, un-mount the GSI's patched copy of /vendor/lib/libVDSceneDetector.so (camera lib) so the HAL uses the vendor original, then restart the camera HAL"
         type: boolean
         default: true
+      a11_camera_transplant:
+        description: "FIX FOR HAL1-ONLY VENDORS: copy the A11 camera service (cameraserver + libcameraservice + its libs) into the A12 image. Needs the A11 link above."
+        type: boolean
+        default: true
       max_size_mib:
         description: "Warn if the final raw image is bigger than this (2.56 GiB = 2621)"
         required: false
@@ -62,6 +66,7 @@ jobs:
       CAMERA_DEBUG_PROPS: ${{ inputs.camera_debug_props }}
       LATE_CAMERA_RESTART: ${{ inputs.late_camera_restart }}
       UNMOUNT_LIBS: ${{ inputs.unmount_patched_libs }}
+      TRANSPLANT: ${{ inputs.a11_camera_transplant }}
       MAX_SIZE_MIB: ${{ inputs.max_size_mib }}
       TAG_PREFIX: ${{ inputs.release_tag }}
       GH_TOKEN: ${{ github.token }}
@@ -70,7 +75,7 @@ jobs:
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL || true
           sudo apt-get update -q
-          sudo apt-get install -y -q android-sdk-libsparse-utils e2fsprogs attr xxd p7zip-full xz-utils unzip file
+          sudo apt-get install -y -q android-sdk-libsparse-utils e2fsprogs attr xxd p7zip-full xz-utils unzip file patchelf binutils
           df -h /
 
       - name: Build
@@ -170,6 +175,62 @@ jobs:
             if [ -n "$l" ]; then sudo setfattr -n security.selinux -v "$l" "$2"; else echo "warning: could not copy SELinux label to $2"; fi
           }
 
+          # Android 12 cameraserver rejects HAL1 devices ("Unsupported HIDL device HAL major version 1").
+          # Android 11's accepts them. Ship A11's cameraserver and every lib in its dependency closure
+          # into /system/lib64/hw/cam11 (a path the system linker namespace permits) with RUNPATH set,
+          # so only cameraserver sees them and the rest of the system keeps its A12 libs.
+          transplant_camera() { # a11root a12root
+            local s="$1" d="$2" P="$2/lib64/hw/cam11"
+            if [ ! -f "$s/lib64/libcameraservice.so" ] || [ ! -f "$s/bin/cameraserver" ]; then
+              echo "::warning::A11 camera files not found, transplant skipped"; return 0
+            fi
+            if [ "$(readelf -h "$s/bin/cameraserver" | awk '/Class:/{print $2}')" != "ELF64" ]; then
+              echo "::warning::A11 cameraserver is not 64-bit, transplant skipped"; return 0
+            fi
+            declare -A seen=(); local queue=("libcameraservice.so") head=0 lib n
+            seen["libcameraservice.so"]=1
+            # closure of the executable first
+            for n in $(readelf -d "$s/bin/cameraserver" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'); do
+              if [ -f "$s/lib64/$n" ] && [ -z "${seen[$n]:-}" ]; then seen[$n]=1; queue+=("$n"); fi
+            done
+            while [ "$head" -lt "${#queue[@]}" ]; do
+              lib="${queue[$head]}"; head=$((head+1))
+              for n in $(readelf -d "$s/lib64/$lib" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'); do
+                if [ -f "$s/lib64/$n" ] && [ -z "${seen[$n]:-}" ]; then seen[$n]=1; queue+=("$n"); fi
+              done
+            done
+            echo "A11 camera closure: ${#queue[@]} libraries"
+            sudo mkdir -p "$P"
+            clone_label "$d/lib64/hw" "$P"
+            local refl="$d/lib64/libcameraservice.so"
+            [ -f "$refl" ] || refl=$(ls "$d"/lib64/*.so | head -1)
+            for lib in "${queue[@]}"; do
+              sudo cp --no-preserve=all "$s/lib64/$lib" "$P/$lib"
+              sudo patchelf --set-rpath /system/lib64/hw/cam11 "$P/$lib"
+              sudo chmod 644 "$P/$lib"; sudo chown 0:0 "$P/$lib"
+              clone_label "$refl" "$P/$lib"
+            done
+            # the executable: keep A12's as a backup, install A11's
+            [ -f "$d/bin/cameraserver.a12" ] || sudo cp -a "$d/bin/cameraserver" "$d/bin/cameraserver.a12"
+            local refb="$d/bin/cameraserver.a12"
+            sudo cp --no-preserve=all "$s/bin/cameraserver" "$d/bin/cameraserver"
+            sudo patchelf --set-rpath /system/lib64/hw/cam11 "$d/bin/cameraserver"
+            sudo chmod 755 "$d/bin/cameraserver"; sudo chown 0:0 "$d/bin/cameraserver"
+            clone_label "$refb" "$d/bin/cameraserver"
+            clone_label "$refb" "$d/bin/cameraserver.a12"
+            # sanity: every NEEDED of every shipped object must resolve somewhere
+            local missing=0 f
+            for f in "$P"/*.so "$d/bin/cameraserver"; do
+              for n in $(readelf -d "$f" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'); do
+                [ -f "$P/$n" ] || [ -f "$d/lib64/$n" ] || [ -f "$d/system_ext/lib64/$n" ] || \
+                  case "$n" in libc.so|libm.so|libdl.so|libc++.so|ld-android.so) ;; *) echo "::warning::unresolved: $(basename "$f") needs $n"; missing=$((missing+1));; esac
+              done
+            done
+            echo "transplant done, unresolved dependencies: $missing"
+            TRANSPLANT_NOTE="A11 camera stack (${#queue[@]} libs, unresolved: $missing)"
+          }
+          TRANSPLANT_NOTE=""
+
           # ---------------------------------------------------------------- A12 image
           echo "::group::Download and unpack A12 GSI"
           get_raw_image "$A12_URL" "$W/a12.img"
@@ -200,7 +261,10 @@ jobs:
 
           collect_info "$R" "$W/info_a12.txt"
 
-          # ---------------------------------------------------------------- A11 image (report only)
+          if [ "$TRANSPLANT" = "true" ] && [ -z "${A11_URL}" ]; then
+            echo "::warning::a11_camera_transplant is on but no A11 link was given, nothing transplanted"
+          fi
+          # ---------------------------------------------------------------- A11 image
           if [ -n "${A11_URL}" ]; then
             echo "::group::Download and unpack A11 GSI (comparison only)"
             get_raw_image "$A11_URL" "$W/a11.img"
@@ -209,6 +273,7 @@ jobs:
               sudo mount -o loop,ro "$W/a11.img" "$MNT11" 2>/dev/null || sudo mount -o loop,ro,noload "$W/a11.img" "$MNT11" || true
               if mountpoint -q "$MNT11"; then
                 R11=$(sysroot "$MNT11"); collect_info "$R11" "$W/info_a11.txt"
+                if [ "$TRANSPLANT" = "true" ]; then transplant_camera "$R11" "$R"; fi
               else echo "A11 image could not be mounted, skipping comparison"; fi
             else echo "A11 image is $T11, skipping comparison"; fi
             sudo umount "$MNT11" 2>/dev/null || true; rm -f "$W/a11.img"
@@ -271,6 +336,7 @@ jobs:
             sudo chown 0:0 "$RC"
             APPLIED="$APPLIED init-rc(camfix.rc)"
           fi
+          [ -n "$TRANSPLANT_NOTE" ] && APPLIED="$APPLIED $TRANSPLANT_NOTE"
           echo "Applied:${APPLIED:- none}"
 
           # ---------------------------------------------------------------- finish image
