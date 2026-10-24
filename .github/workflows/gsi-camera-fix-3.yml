@@ -1,4 +1,4 @@
-name: GSI camera fix (Android 12 GSI on Android 9 MTK vendor)
+name: GSI camera fixes old (Android 12 GSI on Android 9 MTK vendor)
 
 # Run from the Actions tab -> "Run workflow". Paste the links in the form.
 # Output: a compressed sparse system image on a GitHub Release (download link in the run summary),
