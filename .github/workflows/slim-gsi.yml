@@ -277,9 +277,13 @@ jobs:
           bs=$(awk '/^Block size:/{print $3}' orig.dumpe2fs)
           bc=$(awk '/^Block count:/{print $3}' orig.dumpe2fs)
           fb=$(awk '/^Free blocks:/{print $3}' orig.dumpe2fs)
-          used=$(( (bc-fb)*bs ))
+          used_fs=$(( (bc-fb)*bs ))
+          # shared_blocks (deduplicated) images store less on disk than the files add up to.
+          # Rebuilding un-dedupes them, so estimate from the real per-file sizes instead.
+          used=$(du -sxB1 "$MNT" | cut -f1)
           after=$(( used-total ))
-          echo "Used in original fs : $((used/1048576)) MiB"
+          echo "Used blocks in original fs     : $((used_fs/1048576)) MiB (deduplicated)"
+          echo "Real file content (un-deduped) : $((used/1048576)) MiB"
           echo "Estimated after     : $((after/1048576)) MiB   (limit: $MAX_MIB MiB, + ~1-2% ext4 metadata)"
           if [ $((after/1048576)) -gt $((MAX_MIB-30)) ]; then
             echo "::warning::Very tight or too big. Look at the biggest folders below and add more paths to delete_list."
@@ -289,8 +293,8 @@ jobs:
           echo "=== Biggest folders (candidates for extra deletion) ==="
           ( du -sk "$SYS"/app/* "$SYS"/priv-app/* "$SYS"/product/app/* "$SYS"/product/priv-app/* \
                    "$SYS"/system_ext/app/* "$SYS"/system_ext/priv-app/* 2>/dev/null \
-            | sort -rn | head -40 \
-            | awk '{printf "  %8.1f MiB  %s\n", $1/1024, $2}' | sed "s#$MNT##" ) || true
+            | sort -rn \
+            | awk 'NR<=40 {printf "  %8.1f MiB  %s\n", $1/1024, $2}' | sed "s#$MNT##" ) || true
 
           {
             echo "### Delete plan"
