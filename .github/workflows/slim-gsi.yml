@@ -4,7 +4,8 @@
 # Run it from:       Actions tab -> "Slim GSI" -> Run workflow
 #
 # What it does
-#   1. Downloads a GSI (.img.xz) from the URL you give (SourceForge is fine)
+#   1. Downloads a GSI (.img.xz OR .img.gz) from the URL you give (SourceForge is fine).
+#      The compression type is detected from the file contents, not the URL.
 #   2. Decompresses it, un-sparses it if needed
 #   3. Mounts it read-only, copies EVERYTHING to a staging dir with rsync
 #      (-aHAX --numeric-ids: owners, modes, hard links, symlinks, ACLs, xattrs
@@ -31,7 +32,7 @@ on:
   workflow_dispatch:
     inputs:
       url:
-        description: "Direct URL of the GSI .img.xz (SourceForge .../download links work)"
+        description: "Direct URL of the GSI (.img.xz or .img.gz; SourceForge .../download links work)"
         required: true
         type: string
       delete_list:
@@ -73,8 +74,8 @@ jobs:
           rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
           export DEBIAN_FRONTEND=noninteractive
           apt-get update -qq
-          apt-get install -y -qq e2fsprogs rsync xz-utils android-sdk-libsparse-utils python3
-          for t in mke2fs e2fsck dumpe2fs rsync xz img2simg simg2img python3; do
+          apt-get install -y -qq e2fsprogs rsync xz-utils gzip android-sdk-libsparse-utils python3
+          for t in mke2fs e2fsck dumpe2fs rsync xz gzip img2simg simg2img python3; do
             command -v "$t" >/dev/null || { echo "::error::missing tool $t"; exit 1; }
           done
           mke2fs -V 2>&1 | head -1 || true
@@ -182,16 +183,25 @@ jobs:
       - name: Download
         run: |
           cd "$WORK"
-          curl -fL --retry 5 --retry-all-errors --retry-delay 10 -A "Wget/1.21.4" -o in.img.xz "$URL"
-          ls -l in.img.xz
-          magic=$(head -c6 in.img.xz | od -An -tx1 | tr -d ' \n')
-          if [ "$magic" != "fd377a585a00" ]; then
-            echo "::error::Downloaded file is not an .xz archive (got a web page?). Use the direct download link."
-            head -c 300 in.img.xz || true
-            exit 1
-          fi
+          curl -fL --retry 5 --retry-all-errors --retry-delay 10 -A "Wget/1.21.4" -o in.bin "$URL"
+          ls -l in.bin
+
+          # detect compression from the file's magic bytes (URL extension is not trusted)
+          magic=$(head -c6 in.bin | od -An -tx1 | tr -d ' \n')
+          case "$magic" in
+            fd377a585a00) COMP=xz ;;
+            1f8b*)        COMP=gz ;;
+            *)
+              echo "::error::Downloaded file is neither .xz nor .gz (got a web page?). Use the direct download link."
+              head -c 300 in.bin || true
+              exit 1
+              ;;
+          esac
+          echo "COMP=$COMP" >> "$GITHUB_ENV"
+          echo "Detected compression: $COMP"
+
           b="${URL%%[?#]*}"; b="${b%/}"; b="${b%/download}"
-          n="$(basename "$b")"; n="${n%.xz}"; n="${n%.img}"
+          n="$(basename "$b")"; n="${n%.xz}"; n="${n%.gz}"; n="${n%.img}"
           n="$(printf '%s' "$n" | tr -c 'A-Za-z0-9._-' '_')"
           [ -n "$n" ] || n=gsi
           echo "NAME=$n" >> "$GITHUB_ENV"
@@ -200,8 +210,12 @@ jobs:
       - name: Decompress and un-sparse
         run: |
           cd "$WORK"
-          xz -dc in.img.xz > raw0.img
-          rm -f in.img.xz
+          case "$COMP" in
+            xz) xz -dc in.bin > raw0.img ;;
+            gz) gzip -dc in.bin > raw0.img ;;
+            *)  echo "::error::unknown compression '$COMP'"; exit 1 ;;
+          esac
+          rm -f in.bin
           if [ "$(head -c4 raw0.img | od -An -tx1 | tr -d ' \n')" = "3aff26ed" ]; then
             echo "Source is an Android sparse image, converting to raw"
             simg2img raw0.img orig.img
