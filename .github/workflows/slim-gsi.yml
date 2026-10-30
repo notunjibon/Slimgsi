@@ -39,7 +39,7 @@ on:
         description: "Comma-separated paths to delete, relative to the system tree. Globs allowed, case-insensitive."
         required: true
         type: string
-        default: "product/app/Chrome,product/app/Camera2,product/app/Jelly,product/app/Etar,product/app/Keep,product/app/GoogleContacts,product/app/Messages,product/app/CalculatorGoogle,product/app/SpeechServicesByGoogle,product/app/talkback,product/priv-app/Velvet,product/priv-app/Eleven,product/usr/srec/en-US,system_ext/apex/com.android.vndk.v29*,system_ext/apex/com.android.vndk.v30*,system_ext/apex/com.android.vndk.v31*"
+        default: "product/app/DeskClock,system_ext/priv-app/Camera2,system_ext/apex/com.android.vndk.v27*,system_ext/apex/com.android.vndk.v29*"
       max_mib:
         description: "Largest allowed filesystem size in MiB (2.56 GiB = 2621; default leaves a little slack)"
         required: true
